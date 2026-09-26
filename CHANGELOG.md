@@ -10,6 +10,7 @@ Versions follow [SemVer](https://semver.org).
 
 ### Upgrading
 
+- No action needed; the panel's new `landscape` category is additive, and a reader that does not know it treats it as `other`.
 - No action needed; an author's report-only answer to the panel now updates the PR, and a PR whose panel clears is marked ready for review.
 - No action needed; a PR held only by a base-moved blessing heals on the next tick.
 - No contract change; existing contract files need no edits.
@@ -45,6 +46,9 @@ Versions follow [SemVer](https://semver.org).
 
 ### Changed
 
+- A PR is one idea, not one knob: an idea may bring the few changes it needs when the report gives each change's own effect, and a larger idea touching several places is welcome.
+- Authors are told to sweep a hyperparameter or size in one array launch and show the landscape around the chosen value; the panel may block a single-point tuning change that gives no such picture.
+- An idea with a clear mechanism that does not yet beat the best is reported as a success and kept on the author's research line.
 - The sweep rechecks ancestry for PRs held only by a base-moved blessing.
 - Merges performed by the sweep are observed and confirmed in the same tick.
 - Scope checks compare the full candidate tree with its merge-base against the fetched base tip; changes that landed on the base branch never count as the author's, and author edits to the ledger files are refused like any other out-of-scope path.
