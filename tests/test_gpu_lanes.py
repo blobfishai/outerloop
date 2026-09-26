@@ -15,9 +15,9 @@ RAW = json.dumps(
     {
         "owner/repo": {
             "partition": "b200",
-            "account": "torch_pr_36_mren",
+            "account": "lab-account",
             "gpu_type": "b200",
-            "extra": ["--comment=preemption=yes"],
+            "extra": ["--comment=reserved"],
         }
     }
 )
@@ -42,7 +42,7 @@ def settings(submitted):
 
 def test_parse_valid():
     assert parse_gpu_lanes(RAW) == {
-        "owner/repo": GpuLane("b200", "torch_pr_36_mren", "b200", ("--comment=preemption=yes",))
+        "owner/repo": GpuLane("b200", "lab-account", "b200", ("--comment=reserved",))
     }
     assert parse_gpu_lanes('{"o/r":{"partition":"b200"}}') == {"o/r": GpuLane("b200")}
     assert parse_gpu_lanes("{}") == {}
@@ -97,11 +97,11 @@ def test_parse_forbidden_extra(flag):
 
 def test_placement_and_resume(tmp_path):
     d = settings([])
-    assert d.placement(2) == ("torch_pr_36_mren", "b200")
+    assert d.placement(2) == ("lab-account", "b200")
     assert d.placement(0) == ("cpu-account", "cpu")
     assert d.lane(0).extra == ()
-    assert replace(d, target="owner/gpt-speedrun").placement(2) == ("fleet-account", "h200")
-    assert replace(d, gpu_partition="").placement(1) == ("torch_pr_36_mren", "b200")
+    assert replace(d, target="owner/other-repo").placement(2) == ("fleet-account", "h200")
+    assert replace(d, gpu_partition="").placement(1) == ("lab-account", "b200")
     minimal = replace(d, gpu_lanes={"owner/repo": GpuLane("b200")})
     assert minimal.placement(1) == ("cpu-account", "b200")
     # Wake CLI has only a run id; bind the persisted target even with a seed override.
@@ -111,9 +111,9 @@ def test_placement_and_resume(tmp_path):
 
 def assert_b200(argv):
     assert "--partition=b200" in argv
-    assert "--account=torch_pr_36_mren" in argv
+    assert "--account=lab-account" in argv
     assert "--gres=gpu:b200:2" in argv
-    assert "--comment=preemption=yes" in argv
+    assert "--comment=reserved" in argv
     assert not any(arg.startswith("--gpus") for arg in argv)
 
 
@@ -134,7 +134,7 @@ def test_eval_and_author_array_submissions(tmp_path):
 
 def test_unlaned_author_golden_argv(tmp_path):
     submitted: list[list[str]] = []
-    d = replace(settings(submitted), target="owner/gpt-speedrun")
+    d = replace(settings(submitted), target="owner/other-repo")
     _make_launcher(d, tmp_path, tmp_path / "repo", "run", gpus=2)(
         "a" * 40, SyscallRequest((Launch("probe", "true", 10),))
     )

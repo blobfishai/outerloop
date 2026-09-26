@@ -467,17 +467,18 @@ backend); the author backend is
 For a target-specific GPU lane, add a JSON mapping to the deployment's `.env`:
 
 ```bash
-OUTERLOOP_GPU_LANES='{"owner/repo":{"partition":"b200","account":"torch_pr_36_mren","gpu_type":"b200","extra":["--comment=preemption=yes"]}}'
+OUTERLOOP_GPU_LANES='{"owner/repo":{"partition":"gpu-large","account":"my-account","gpu_type":"b200","extra":["--comment=reserved"]}}'
 ```
 
-Replace `owner/repo` with the reserved node's target. This Torch lane submits
-`--account=torch_pr_36_mren --partition=b200 --gres=gpu:b200:N --comment=preemption=yes`
-for that target's GPU evals and author launches (including arrays and re-measures).
-Other targets, such as gpt-speedrun, keep the fleet's H200 lane; CPU jobs are
+This lane submits `--account=my-account --partition=gpu-large --gres=gpu:b200:N
+--comment=reserved` for that target's GPU evals and author launches (including
+arrays and re-measures). Other targets keep the fleet GPU lane; CPU jobs are
 unchanged. Only `partition` is required; an omitted `account` uses the CPU/default
 account, and omitted `gpu_type` preserves untyped per-node GPU requests. `extra`
-is a list of `--name=value` flags; kernel-owned account, partition, gres, gpus*,
-time, mem, and cpus* flags are rejected, as are unknown keys and malformed JSON.
+is a list of `--name=value` flags. A flag the kernel sets itself (account,
+partition, gres, gpus*, cpus*, mem*, time, qos, nice, array, dependency, begin,
+job-name, output, error, wrap, parsable, chdir) is rejected, since sbatch lets the
+later flag win; so are unknown keys and malformed JSON.
 These are cluster settings, not target contract fields.
 
 `OUTERLOOP_CLAUDE_MODEL` names the model for every Claude role (author,
