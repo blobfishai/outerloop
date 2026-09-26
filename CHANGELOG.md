@@ -6,6 +6,14 @@ Versions follow [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+### Added
+
+- Optional per-target GPU lanes route evals and author launches to deployment-specific partitions, accounts, GPU types, and sbatch flags.
+
+### Upgrading
+
+- No action needed; OUTERLOOP_GPU_LANES is optional.
+
 ## [0.2.1] - 2026-09-25
 
 ### Upgrading

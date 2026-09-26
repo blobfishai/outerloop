@@ -464,6 +464,22 @@ default, and a lens that names no model runs the author's model when it
 shares the author's backend, and must name an explicit model on any other
 backend); the author backend is
 `OUTERLOOP_AUTHOR_BACKEND`/`OUTERLOOP_AUTHOR_MODEL`.
+For a target-specific GPU lane, add a JSON mapping to the deployment's `.env`:
+
+```bash
+OUTERLOOP_GPU_LANES='{"owner/repo":{"partition":"b200","account":"torch_pr_36_mren","gpu_type":"b200","extra":["--comment=preemption=yes"]}}'
+```
+
+Replace `owner/repo` with the reserved node's target. This Torch lane submits
+`--account=torch_pr_36_mren --partition=b200 --gres=gpu:b200:N --comment=preemption=yes`
+for that target's GPU evals and author launches (including arrays and re-measures).
+Other targets, such as gpt-speedrun, keep the fleet's H200 lane; CPU jobs are
+unchanged. Only `partition` is required; an omitted `account` uses the CPU/default
+account, and omitted `gpu_type` preserves untyped per-node GPU requests. `extra`
+is a list of `--name=value` flags; kernel-owned account, partition, gres, gpus*,
+time, mem, and cpus* flags are rejected, as are unknown keys and malformed JSON.
+These are cluster settings, not target contract fields.
+
 `OUTERLOOP_CLAUDE_MODEL` names the model for every Claude role (author,
 panel judges, steward) when no explicit or inherited model covers that role:
 there is no built-in default, and `start` refuses when a role needs it, naming
