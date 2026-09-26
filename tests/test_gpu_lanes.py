@@ -14,9 +14,9 @@ from outerloop.syscall import Launch, SyscallRequest
 RAW = json.dumps(
     {
         "owner/repo": {
-            "partition": "b200",
+            "partition": "gpu-large",
             "account": "lab-account",
-            "gpu_type": "b200",
+            "gpu_type": "a100",
             "extra": ["--comment=reserved"],
         }
     }
@@ -33,7 +33,7 @@ def settings(submitted):
         "/image.sif",
         "cpu-account",
         "cpu",
-        gpu_partition="h200",
+        gpu_partition="gpu-fleet",
         gpu_account="fleet-account",
         gpu_lanes=parse_gpu_lanes(RAW),
         target="owner/repo",
@@ -42,9 +42,9 @@ def settings(submitted):
 
 def test_parse_valid():
     assert parse_gpu_lanes(RAW) == {
-        "owner/repo": GpuLane("b200", "lab-account", "b200", ("--comment=reserved",))
+        "owner/repo": GpuLane("gpu-large", "lab-account", "a100", ("--comment=reserved",))
     }
-    assert parse_gpu_lanes('{"o/r":{"partition":"b200"}}') == {"o/r": GpuLane("b200")}
+    assert parse_gpu_lanes('{"o/r":{"partition":"gpu-large"}}') == {"o/r": GpuLane("gpu-large")}
     assert parse_gpu_lanes("{}") == {}
 
 
@@ -53,14 +53,14 @@ def test_parse_valid():
     [
         "{bad",
         "[]",
-        '{"o/r":{"partition":"b200","typo":"x"}}',
+        '{"o/r":{"partition":"gpu-large","typo":"x"}}',
         '{"o/r":{"account":"a"}}',
         '{"o/r":{"partition":4}}',
         '{"o/r":{"partition":"p","account":null}}',
         '{"o/r":{"partition":"p","gpu_type":4}}',
         '{"o/r":{"partition":"p","extra":"--comment=x"}}',
         '{"o/r":{"partition":"p","extra":[4]}}',
-        '{"o/r":{"partition":"p","gpu_type":"b200:8"}}',
+        '{"o/r":{"partition":"p","gpu_type":"a100:8"}}',
         '{"repo":{"partition":"p"}}',
     ],
 )
@@ -97,22 +97,22 @@ def test_parse_forbidden_extra(flag):
 
 def test_placement_and_resume(tmp_path):
     d = settings([])
-    assert d.placement(2) == ("lab-account", "b200")
+    assert d.placement(2) == ("lab-account", "gpu-large")
     assert d.placement(0) == ("cpu-account", "cpu")
     assert d.lane(0).extra == ()
-    assert replace(d, target="owner/other-repo").placement(2) == ("fleet-account", "h200")
-    assert replace(d, gpu_partition="").placement(1) == ("lab-account", "b200")
-    minimal = replace(d, gpu_lanes={"owner/repo": GpuLane("b200")})
-    assert minimal.placement(1) == ("cpu-account", "b200")
+    assert replace(d, target="owner/other-repo").placement(2) == ("fleet-account", "gpu-fleet")
+    assert replace(d, gpu_partition="").placement(1) == ("lab-account", "gpu-large")
+    minimal = replace(d, gpu_lanes={"owner/repo": GpuLane("gpu-large")})
+    assert minimal.placement(1) == ("cpu-account", "gpu-large")
     # Wake CLI has only a run id; bind the persisted target even with a seed override.
     wake = replace(d, target="", seed_cache=tmp_path)
     assert with_seed(wake, tmp_path, "owner/repo").lane(1) == d.lane(1)
 
 
-def assert_b200(argv):
-    assert "--partition=b200" in argv
+def assert_lane(argv):
+    assert "--partition=gpu-large" in argv
     assert "--account=lab-account" in argv
-    assert "--gres=gpu:b200:2" in argv
+    assert "--gres=gpu:a100:2" in argv
     assert "--comment=reserved" in argv
     assert not any(arg.startswith("--gpus") for arg in argv)
 
@@ -122,12 +122,12 @@ def test_eval_and_author_array_submissions(tmp_path):
     d = settings(submitted)
     measurer = d.measurer(tmp_path, tmp_path / "repo", 10, "run")
     measurer._dispatch(Measure("candidate", "a" * 40, "true", "score", gpus=2))
-    assert_b200(submitted[-1])
+    assert_lane(submitted[-1])
     assert not any(arg.startswith("--nice") for arg in submitted[-1])
     launcher = _make_launcher(d, tmp_path, tmp_path / "repo", "run", gpus=2)
     request = SyscallRequest((Launch("probe", "true", 10, array=4, concurrency=2),))
     assert launcher("a" * 40, request) == "afterany:123"
-    assert_b200(submitted[-1])
+    assert_lane(submitted[-1])
     assert "--array=0-3%2" in submitted[-1]
     assert f"--nice={LAUNCH_NICE}" in submitted[-1]
 
@@ -147,7 +147,7 @@ def test_unlaned_author_golden_argv(tmp_path):
         "--mem=128G",
         "--output=/dev/null",
         "--account=fleet-account",
-        "--partition=h200",
+        "--partition=gpu-fleet",
         "--gpus-per-node=2",
         "--nice=5000",
         str(tmp_path / "eval-launch-probe" / "job.sh"),
@@ -169,8 +169,8 @@ def test_typed_gres_and_legacy_argv():
         "--gpus-per-node=2",
         "--wrap=true",
     ]
-    assert "--gres=gpu:b200:2" in replace(spec, gpu_type="b200").to_argv()
-    assert gpus_in_gres("gres/gpu:b200:2") == 2
+    assert "--gres=gpu:a100:2" in replace(spec, gpu_type="a100").to_argv()
+    assert gpus_in_gres("gres/gpu:a100:2") == 2
 
 
 @pytest.mark.parametrize("module", ["outerloop.tick", "outerloop.attempt"])
@@ -224,7 +224,7 @@ def test_tick_preflight_accepts_override_without_fleet_lane(monkeypatch, tmp_pat
     _, spec = _service_spec_from_env(tmp_path)
     assert spec is not None
     assert spec.gpu_partition == "" and spec.gpu_account == ""
-    assert spec.gpu_lanes["owner/repo"].partition == "b200"
+    assert spec.gpu_lanes["owner/repo"].partition == "gpu-large"
     contract = SimpleNamespace(benchmarks=[SimpleNamespace(name="bench", gpus=2)])
     assert _gpu_lane_error(contract, "bench", spec) == ""
 

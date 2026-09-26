@@ -467,10 +467,10 @@ backend); the author backend is
 For a target-specific GPU lane, add a JSON mapping to the deployment's `.env`:
 
 ```bash
-OUTERLOOP_GPU_LANES='{"owner/repo":{"partition":"gpu-large","account":"my-account","gpu_type":"b200","extra":["--comment=reserved"]}}'
+OUTERLOOP_GPU_LANES='{"owner/repo":{"partition":"gpu-large","account":"my-account","gpu_type":"a100","extra":["--comment=reserved"]}}'
 ```
 
-This lane submits `--account=my-account --partition=gpu-large --gres=gpu:b200:N
+This lane submits `--account=my-account --partition=gpu-large --gres=gpu:a100:N
 --comment=reserved` for that target's GPU evals and author launches (including
 arrays and re-measures). Other targets keep the fleet GPU lane; CPU jobs are
 unchanged. Only `partition` is required; an omitted `account` uses the CPU/default
