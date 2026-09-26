@@ -495,7 +495,8 @@ so it also needs the image
 cluster, evals run inside the Apptainer image at `OUTERLOOP_IMAGE` (default
 `~/outerloop-images/agent-py312.sif`) in a jail that binds only the
 checked-out tree — an eval that needs data must fetch it into the tree, and
-GPU jobs are requested per node (`--gpus-per-node`). The tick has three
+GPU jobs are requested per node: `--gpus-per-node=N`, or `--gres=gpu:<type>:N`
+for a lane with a GPU type (see `OUTERLOOP_GPU_LANES`). The tick has three
 scheduling knobs. `OUTERLOOP_CADENCE_MIN`, read from the `.env`, is how often the
 chain ticks (minutes; default 30). Two finer ones are read from the tick's own
 environment (set at launch, not the per-tick `.env`): `OUTERLOOP_MIN_TICK_MINUTES`
