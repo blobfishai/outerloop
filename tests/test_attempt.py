@@ -1032,6 +1032,21 @@ def test_snapshot_refs_are_dropped_after_a_climb(tmp_path, target_repo) -> None:
     assert _git(ws, "for-each-ref", "refs/dispatch/").strip() == ""
 
 
+def test_launch_records_the_base_it_read_the_contract_from(tmp_path, target_repo) -> None:
+    # Terminal recovery of a run that never parked reads the contract at this
+    # ref, never at the author's HEAD (test_sparse covers the recovery itself).
+    from outerloop.attempt import BASE_REF
+
+    run_live(
+        tmp_path,
+        target_repo,
+        edits={"src/pilot/solvers/tsp.py": "def solve(): return 'better'\n"},
+        values=[13.876, 13.1],
+    )
+    ws = tmp_path / "state" / "runs" / "tsp-1" / "ws"
+    assert _git(ws, "rev-parse", BASE_REF) == _git(target_repo, "rev-parse", "main")
+
+
 def test_no_improvement_ends_negative_result_and_pushes_nothing(tmp_path, target_repo) -> None:
     outcome, github = run_live(
         tmp_path,

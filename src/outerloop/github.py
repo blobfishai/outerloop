@@ -1618,9 +1618,10 @@ class Workspace:
         widened cone, or none at all, would also cost the disk the cone
         exists to save). A no-op for a whole-tree workspace."""
         if self.sparse:
-            # cone entries match sparse._SAFE_DIR: no part starts with "-",
-            # so none can read as an option
-            self.git("sparse-checkout", "set", "--cone", *self.sparse)
+            # The kernel validates cone entries. A scope path absent at the
+            # base may since have become a file: keep its cone entry, which
+            # includes that file through the parent, rather than rejecting it.
+            self.git("sparse-checkout", "set", "--cone", "--skip-checks", *self.sparse)
 
     def add_worktree(self, dest: Path, rev: str) -> None:
         """Materialize `rev` at `dest` as a detached worktree with the KERNEL's

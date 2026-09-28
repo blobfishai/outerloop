@@ -909,6 +909,7 @@ def measure_and_decide(
             metric=bench.metric,
             seed_env=bench.seed_env or "",
             gpus=bench.gpus,
+            sparse=tuple(getattr(measurer, "sparse", ())),
         )
         if bench.baseline == "cached" and cache_dir is not None
         else None
@@ -951,6 +952,7 @@ def measure_and_decide(
                 metric=bench.metric,
                 seed_env=bench.seed_env or "",
                 gpus=bench.gpus,
+                sparse=tuple(getattr(measurer, "sparse", ())),
             )
     candidate = main["candidate"]
     if not improved(baseline, candidate, bench.direction, min_relative_improvement):
@@ -1651,6 +1653,7 @@ def attempt_once(
                     metric=bench.metric,
                     seed_env=bench.seed_env or "",
                     gpus=bench.gpus,
+                    sparse=tuple(getattr(measurer, "sparse", ())),
                 ):
                     main_evals = 1
             problem = no_backend or syscall_budget_error(

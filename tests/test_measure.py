@@ -3,6 +3,7 @@ authoritative liveness source (crash-safe against the submit/marker gap)."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -461,6 +462,46 @@ def test_changed_contract_for_same_name_and_sha_is_not_aliased(tmp_path):
     _land(m, base, 0.42)
     with pytest.raises(MeasurementPending):
         m.results([new_cmd])
+
+
+def test_pre_policy_result_is_retained_but_remeasured(tmp_path):
+    submitted: list = []
+    m = _measurer(tmp_path, submitted)
+    measure = _measures()[0]
+    legacy_det = (
+        f"{m.image}\0{measure.name}\0{measure.tree_sha}\0{measure.command}\0{measure.metric}"
+    )
+    legacy_slot = (
+        f"{measure.name}-{measure.tree_sha}-{hashlib.sha1(legacy_det.encode()).hexdigest()}"
+    )
+    legacy = tmp_path / f"eval-{legacy_slot}"
+    legacy.mkdir()
+    (legacy / "exit-code").write_text("0")
+    (legacy / "stdout").write_text('{"metric":"r2","value":0.99}\n')
+    with pytest.raises(MeasurementPending):
+        m.results([measure])
+    assert len(submitted) == 1
+    assert (legacy / "stdout").read_text() == '{"metric":"r2","value":0.99}\n'
+    _land(m, measure, 0.42)
+    assert m.results([measure]) == {"baseline": 0.42}
+    assert len(submitted) == 1  # the new-policy result remains idempotent
+
+
+def test_changed_cone_remeasures_and_keeps_the_old_result(tmp_path):
+    submitted: list = []
+    m = _measurer(tmp_path, submitted)
+    measure = _measures()[0]
+    old_slot, old_job = m._slot(measure), m._job_name(measure)
+    _land(m, measure, 0.42)
+    m.sparse = ("src",)
+    assert m._slot(measure) != old_slot and m._job_name(measure) != old_job
+    with pytest.raises(MeasurementPending):
+        m.results([measure])
+    assert len(submitted) == 1
+    _land(m, measure, 0.43)
+    assert m.results([measure]) == {"baseline": 0.43}
+    m.sparse = ()
+    assert m.results([measure]) == {"baseline": 0.42}
 
 
 def test_dispatch_settings_place_gpu_jobs_on_the_gpu_lane(tmp_path):
