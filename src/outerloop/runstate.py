@@ -19,6 +19,7 @@ import fcntl
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -177,6 +178,26 @@ class RunRecord:
 
     def ended(self) -> bool:
         return self.state == ENDED
+
+
+_SHA = r"[0-9a-fA-F]{7,40}"
+# The two reason texts kernels wrote before auto_bless_reason_kind existed.
+_LEGACY_BASE_MOVED = re.compile(
+    rf"base moved: \S+ (?:{_SHA} != measured |tip {_SHA} moved past measured base )({_SHA})"
+)
+
+
+def base_moved_refusal(record: RunRecord) -> tuple[bool, str]:
+    """Whether publish refused the automatic-merge bless only because the
+    base moved, and the measured base that refusal names. It reads the typed
+    kind, or for older records either legacy reason text. The tick's re-bless
+    and the base-moved notice share it: such a PR merges once its head holds
+    the tip, so it still needs the fold."""
+    if record.auto_bless_reason_kind:
+        waits = record.auto_bless_reason_kind == "base_moved"
+        return waits, record.auto_bless_base if waits else ""
+    match = _LEGACY_BASE_MOVED.fullmatch(record.auto_bless_reason)
+    return (True, match[1]) if match else (False, "")
 
 
 @dataclass(frozen=True)

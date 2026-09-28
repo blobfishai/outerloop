@@ -21,6 +21,8 @@ from outerloop.brief import MAX_COMMENT_CHARS, cap, code_fence
 from outerloop.github import GitHubClient, GitHubError, is_own_login
 from outerloop.harness import redact
 from outerloop.markers import has_marker
+from outerloop.runstate import base_moved_refusal
+from outerloop.sparse import outside
 from outerloop.verifier import VERIFY_MARKER
 
 if TYPE_CHECKING:
@@ -684,6 +686,39 @@ def advance_github_positions(directory: Path, positions: dict[str, int]) -> None
             _write_at(fd, "positions.json", current)
 
 
+# GitHub merge states that positively report no conflict with the base. An
+# unknown or missing state is no evidence; "behind" means protection wants the
+# branch updated first, which is the fold itself.
+_CONFLICT_FREE = frozenset({"clean", "unstable", "blocked", "has_hooks"})
+
+
+def _unseen_by_cone(github: GitHubClient, record: RunRecord, head: str, tip: str) -> bool:
+    """Whether everything the base gained past the PR head lies outside the
+    run's recorded kernel cone (stage "cone", written by the kernel), with the
+    base still holding the run's recorded pin: the kernel then pins what the
+    PR holds and measures the same trees. A whole tree, a PR on the automatic
+    merge path (which needs the fold), a merge-base other than the recorded
+    pin (a rewritten base or a later fold), an unreadable or possibly
+    truncated file list, or a GitHub error counts as seen."""
+    cone = record.stage.get("cone")
+    pin = record.stage.get("base_sha")
+    if not isinstance(cone, list) or not cone or not all(isinstance(d, str) for d in cone):
+        return False
+    if not isinstance(pin, str) or not pin:
+        return False
+    if record.auto_blessed_head or base_moved_refusal(record)[0]:
+        return False
+    try:
+        moved = github.compare_files(record.target, head, tip)
+    except GitHubError as exc:
+        log.warning("cannot list the base's new files (GitHub status %s)", exc.status)
+        return False
+    if moved is None:
+        return False
+    files, common = moved
+    return common == pin and len(outside(files, tuple(cone))) == len(files)
+
+
 def base_moved_key(tip: str) -> str:
     """One message per base tip; the suffix changes when the advice does,
     so a run parked under the old wording still receives the new one."""
@@ -788,6 +823,14 @@ def gather_github_messages(
             stale = not github.head_contains(record.target, tip, head)
         except GitHubError as exc:
             log.warning("cannot compare PR head with base tip (GitHub status %s)", exc.status)
+    if (
+        stale
+        and pr.get("mergeable_state") in _CONFLICT_FREE
+        and _unseen_by_cone(github, record, head, tip)
+    ):
+        # The kernel pins what the head holds and measures the same trees, so
+        # an unseen move needs no fold and must not wake the author.
+        stale = False
     if stale:
         text = base_moved_text(tip, base_ref)
         if pr.get("mergeable_state") == "dirty":

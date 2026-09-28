@@ -144,6 +144,37 @@ def test_compare_rejects_malformed_body(provider: FileTokenProvider, response) -
         client.head_contains("org/repo", "base", "head")
 
 
+@pytest.mark.parametrize(
+    "files, merge_base, expected",
+    [
+        ([{"filename": "robofish/a.txt"}], "m1", (["robofish/a.txt"], "m1")),
+        (
+            [{"filename": "src/new.py", "previous_filename": "robofish/old.py"}],
+            "m1",
+            (["src/new.py", "robofish/old.py"], "m1"),
+        ),
+        ([], "m1", ([], "m1")),
+        ([{"filename": f"f{i}"} for i in range(300)], "m1", None),  # GitHub truncates at 300
+        ([{"filename": ""}], "m1", None),
+        (["robofish/a.txt"], "m1", None),
+        (None, "m1", None),
+        ([{"filename": "robofish/a.txt"}], None, None),  # no merge-base to check the pin with
+    ],
+)
+def test_compare_files_lists_both_sides_or_none(
+    provider: FileTokenProvider, files, merge_base, expected
+):
+    response = {"status": "diverged", "ahead_by": 1, "behind_by": 1, "files": files}
+    if merge_base is not None:
+        response["merge_base_commit"] = {"sha": merge_base}
+    transport = FakeTransport([response])
+    client = GitHubClient(auth=provider, transport=transport)
+    assert client.compare_files("org/repo", "head", "release/next") == expected
+    assert transport.requests[0].full_url == (
+        "https://api.github.com/repos/org/repo/compare/head...release%2Fnext"
+    )
+
+
 def test_compare_surfaces_unavailable(provider: FileTokenProvider, monkeypatch) -> None:
     import io
     import urllib.error

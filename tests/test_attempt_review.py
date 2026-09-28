@@ -1360,6 +1360,9 @@ def test_review_wake_needs_no_fold_for_a_base_move_outside_the_cone(
     )
     tip = tips[0]
     latest = load_record(root, record.run_id)
+    # the park keeps the kernel's cone, which the PR-level base-moved notice reads
+    cone = ["docs/.outerloop-cone", "src/pilot/solvers"]
+    assert latest.stage["cone"] == (["agent_memory", *cone] if lines else cone)
     messages = pending(ws.parent, 0)
     refused = [m for m in messages if m.key.startswith("refused:")]
     if any(path.startswith("src/") for path in moves):

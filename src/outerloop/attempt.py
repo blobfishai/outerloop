@@ -473,6 +473,9 @@ STAGE_RETAINED_KEYS = (
     "hypothesis",
     "message_counter",
     "message_delivery",
+    # the kernel's cone, so a PR-level base-moved notice can tell an unseen
+    # move from one the measured trees can see (inbox._unseen_by_cone)
+    "cone",
 )
 
 
@@ -1573,6 +1576,7 @@ def _wake_author_sleep(
             "gpu_hours_used": gpu_hours_used,
             "base_sha": base_sha,
             "base_branch": base_branch,
+            "cone": list(ws.sparse),
         },
     )
     save_record(run_root, record, now)
@@ -3721,7 +3725,13 @@ def publish(
         )
 
     record = dc_replace(
-        record, stage={**record.stage, "base_sha": base_sha, "base_branch": base_branch}
+        record,
+        stage={
+            **record.stage,
+            "base_sha": base_sha,
+            "base_branch": base_branch,
+            "cone": list(ws.sparse),
+        },
     )
     bench = _benchmark(contract, config.benchmark)
 
