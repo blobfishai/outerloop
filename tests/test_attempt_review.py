@@ -1256,14 +1256,15 @@ def test_inline_review_submit_uses_fresh_base(review_run, monkeypatch, contains_
         (("src/pilot/solvers/other.py", "robofish/clip.txt"), "before-wake"),
     ],
 )
+@pytest.mark.parametrize("lines", [False, True])
 def test_review_wake_needs_no_fold_for_a_base_move_outside_the_cone(
-    review_run, tmp_path, monkeypatch, moves, when
+    review_run, tmp_path, monkeypatch, moves, when, lines
 ):
     """Another team lands on the base before the review wake or during the
     author's leg. A move outside the kernel's cone leaves the pin on what the
     PR already holds: the gate measures there, never refuses, and the PR is
-    updated. A move the cone can see still needs the fold, even behind a
-    later move outside it."""
+    updated, with or without a research line. A move the cone can see still
+    needs the fold, even behind a later move outside it."""
     from outerloop.compute import LocalCompute
     from outerloop.inbox import pending
     from outerloop.measure import DispatchSettings
@@ -1272,7 +1273,10 @@ def test_review_wake_needs_no_fold_for_a_base_move_outside_the_cone(
     root, bare = review_run
     ws = run_dir(root, "tsp-r1") / "ws"
     _git(ws, "checkout", "-q", "-B", "declare", "origin/main")
-    (ws / ".outerloop.yaml").write_text(CONTRACT + "workspace:\n  sparse: [src/pilot/solvers]\n")
+    contract = CONTRACT.replace("direction: min\n", "direction: min\n    lines: true\n")
+    (ws / ".outerloop.yaml").write_text(
+        (contract if lines else CONTRACT) + "workspace:\n  sparse: [src/pilot/solvers]\n"
+    )
     _git(ws, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "declare the cone")
     pin = _git(ws, "rev-parse", "HEAD").strip()
     _git(ws, "push", "-q", "origin", "HEAD:main")

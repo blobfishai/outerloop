@@ -1538,10 +1538,11 @@ def _wake_author_sleep(
                 origin=record.run_id,
             ),
         )
-    # Re-pin the gate and scope base after a line's base advances.
+    # Re-pin the gate and scope base after a line's base advances, when the
+    # advance is one the kernel's cone can see (an unseen one measures the same).
     if _line_ref_for(bench, config.agent_id):
         fresh_base = _line_base_advanced(ws, base_branch, base_sha)
-        if fresh_base:
+        if fresh_base and _moved_in_cone(ws, base_sha, fresh_base, ws.sparse):
             digest = _reintegration_digest(ws, base_sha, fresh_base)
             base_sha = fresh_base
             append(

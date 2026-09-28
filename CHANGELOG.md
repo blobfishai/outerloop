@@ -27,7 +27,8 @@ Versions follow [SemVer](https://semver.org).
   longer makes a submit stale, a gate pin outdated, or an update to an open PR
   refused. A review wake pins the newest base commit the head already contains,
   the gate measures there, and the sealed commit contains that pin, so the push
-  reverts nothing. Moves the cone can see (root files including the contract,
+  reverts nothing. A research line re-pins its base only for an advance the
+  cone can see. Moves the cone can see (root files including the contract,
   and declared or scope directories) still need a fold. Whole-tree contracts count
   every move, and auto-merge still requires the head to contain the base tip.
   The PR-level base-moved notice cannot see the cone yet.
