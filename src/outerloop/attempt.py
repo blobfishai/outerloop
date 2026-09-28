@@ -3860,20 +3860,27 @@ def publish(
                     folded = ws.git("merge-base", result.candidate_sha, fresh_base).strip()
                     common = ws.git("merge-base", folded, head).strip()
                     # Against the base it lands on, the candidate may change only
-                    # what the gate measured or the PR already changes: content
+                    # what the gate measured, or carry the PR head's own version
+                    # of a path unchanged (content, mode and presence): content
                     # of a base rewritten after the gate must never publish as
                     # the author's change.
-                    base_ref = f"refs/remotes/origin/{base_branch}"
                     landing = submission_paths(
-                        ws, base_ref, result.candidate_sha, exclude_memory=bool(line_ref)
+                        ws,
+                        f"refs/remotes/origin/{base_branch}",
+                        result.candidate_sha,
+                        exclude_memory=bool(line_ref),
                     )
-                    published = submission_paths(ws, base_ref, head, exclude_memory=bool(line_ref))
+                    moved_from_head = ws.git(
+                        "diff", "--no-renames", "--name-only", "-z", head, result.candidate_sha
+                    ).split("\0")
                 except Exception as exc:
                     return refuse(
                         "Publish refused: cannot confirm PR base ancestry.",
                         quoted_text=redact(str(exc), secrets),
                     )
-                unmeasured = sorted(set(landing) - set(result.measured_paths) - set(published))
+                unmeasured = sorted(
+                    (set(landing) - set(result.measured_paths)) & {p for p in moved_from_head if p}
+                )
                 if unmeasured:
                     return refuse(
                         "Publish refused: against the current base, the sealed commit "

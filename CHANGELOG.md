@@ -32,9 +32,10 @@ Versions follow [SemVer](https://semver.org).
   ancestry and a later tip the author never saw is never spliced in. A rewritten
   base is refused as before. An update to an open PR is also refused when,
   against the current base, the sealed commit would change paths that the gate
-  did not measure and the PR does not already change: the base was rewritten
-  after the gate, and its content must not publish as the author's. A research
-  line re-pins its base only for an advance the cone can see. Moves the cone can see (root files including the contract,
+  did not measure, unless it carries the PR head's own version of them unchanged
+  (content, mode and presence). The base was then rewritten after the gate, and
+  its content must not publish as the author's. A research line re-pins its base
+  only for an advance the cone can see. Moves the cone can see (root files including the contract,
   and declared or scope directories) still need a fold. Whole-tree contracts count
   every move, and auto-merge still requires the head to contain the base tip.
   The PR-level base-moved notice cannot see the cone yet.

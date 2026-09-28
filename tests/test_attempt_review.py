@@ -2112,6 +2112,73 @@ def test_publish_to_an_open_pr_refuses_a_base_rewritten_under_a_fold(review_run,
     assert _git(bare, "rev-parse", PR_BRANCH).strip() == head
 
 
+@pytest.mark.parametrize("resolution", ["base", "pr"])
+def test_publish_to_an_open_pr_checks_a_carried_path_by_content(review_run, tmp_path, resolution):
+    """The PR already changes a path outside the cone. The author folds a base
+    that changed it too, and the base is rewound after the gate. Keeping the
+    base's version was never measured, so publishing it over the PR's own is
+    refused; keeping the PR's version was measured and publishes."""
+    from outerloop.attempt import submission_paths
+    from outerloop.dispatch import snapshot_tree
+    from outerloop.github import Workspace
+
+    root, bare = review_run
+    path = run_dir(root, "tsp-r1") / "ws"
+    author = ("-c", "user.name=t", "-c", "user.email=t@t")
+    other = tmp_path / "other-team"
+    _git(tmp_path, "clone", "-q", str(bare), str(other))
+
+    def land(content: str) -> str:
+        (other / "robofish").mkdir(exist_ok=True)
+        (other / "robofish/clip.txt").write_text(content)
+        _git(other, *author, "add", "-A")
+        _git(other, *author, "commit", "-qm", content.strip())
+        _git(other, "push", "-q", "origin", "HEAD:main")
+        return _git(other, "rev-parse", "HEAD").strip()
+
+    pin = land("base X\n")
+    _git(path, "fetch", "-q", "origin")
+    _git(path, "merge", "-q", "--ff-only", pin)
+    (path / "robofish/clip.txt").write_text("PR Y\n")
+    (path / "src/pilot/solvers/pr.py").write_text("prior PR change\n")
+    _git(path, *author, "add", "-A")
+    _git(path, *author, "commit", "-qm", "PR")
+    head = _git(path, "rev-parse", "HEAD").strip()
+    _git(path, "push", "-q", "origin", f"{head}:refs/heads/{PR_BRANCH}")
+    ws = Workspace(root=path, url=str(bare))
+    ws.sparse = ("docs/.outerloop-cone", "src/pilot/solvers")
+    ws.apply_sparse()
+    folded = land("base Z\n")
+    _git(path, "fetch", "-q", "origin")
+    fold = subprocess.run(
+        ["git", "-C", str(path), *author, "merge", "-q", "--no-edit", folded],
+        capture_output=True,
+        text=True,
+    )
+    assert fold.returncode != 0  # the PR and the base both changed the path
+    side = "--theirs" if resolution == "base" else "--ours"
+    _git(path, "checkout", side, "--", "robofish/clip.txt")
+    _git(path, *author, "add", "--sparse", "robofish/clip.txt")
+    _git(path, *author, "commit", "-q", "--no-edit")
+    (path / "src/pilot/solvers/tsp.py").write_text("submitted\n")
+    snap = snapshot_tree(ws, _git(path, "rev-parse", "HEAD").strip())
+    ws.fetch_origin()
+    measured = submission_paths(ws, "refs/remotes/origin/main", snap.commit)  # as the gate did
+    _git(other, "reset", "-q", "--hard", pin)
+    _git(other, "push", "-q", "--force", "origin", "HEAD:main")
+    ws.fetch_origin()
+
+    outcome = _publish_to_open_pr(root, ws, path, snap, head, pin, measured)
+
+    pushed = _git(bare, "rev-parse", PR_BRANCH).strip()
+    if resolution == "base":
+        assert "robofish/clip.txt" not in measured
+        assert outcome.outcome == "publish-refused" and pushed == head
+        return
+    assert outcome.outcome == "improved"
+    assert _git(bare, "show", f"{pushed}:robofish/clip.txt") == "PR Y\n"
+
+
 @pytest.mark.parametrize("base", ["main", "release"])
 @pytest.mark.parametrize(
     "history", ["equal", "ancestor", "divergent", "old-pin", "rewound", "unknown-pin"]
