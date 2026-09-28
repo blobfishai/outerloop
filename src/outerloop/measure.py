@@ -283,6 +283,8 @@ class DispatchedMeasurer:
     # the target's kernel-warmed seed cache, copied into each job (evalcache)
     seed_cache: Path | None = None
     qos: str = ""
+    # the kernel's cone for the workspace (sparse.py); () = whole tree
+    sparse: tuple[str, ...] = ()
 
     def _placement(self, m: Measure) -> tuple[str, str]:
         if m.gpus <= 0 or not self.compute.has_lanes:
@@ -393,6 +395,7 @@ class DispatchedMeasurer:
             extra_env=m.env(),
             gpus=m.gpus,
             seed_cache=self.seed_cache,
+            sparse=self.sparse,
         )
         account, partition = self._placement(m)
         spec: JobSpec = eval_job_spec(
@@ -564,7 +567,12 @@ class DispatchSettings:
         return self.gpu_account or self.account, self.gpu_partition
 
     def measurer(
-        self, run_dir: Path, repo_root: Path, eval_minutes: int, run_tag: str
+        self,
+        run_dir: Path,
+        repo_root: Path,
+        eval_minutes: int,
+        run_tag: str,
+        sparse: tuple[str, ...] = (),
     ) -> DispatchedMeasurer:
         """Bind these coordinates to one run's dispatched measurer. `repo_root`
         is the workspace whose `refs/dispatch/*` snapshots the eval jobs check
@@ -587,4 +595,5 @@ class DispatchSettings:
             # shares its cached baseline measurement (Benchmark.baseline)
             baseline_cache=run_dir.parent / "baselines",
             seed_cache=self.seed_cache,
+            sparse=sparse,
         )

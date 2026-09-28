@@ -13,6 +13,8 @@ Versions follow [SemVer](https://semver.org).
 
 - The `research-log` ledger works on large repositories. The branch was created at the default branch's head and so carried its whole tree; past GitHub's recursive-tree limit every ledger read reported an incomplete tree, publications deferred, and merged runs never ended. It is now created as a parentless commit holding only a README (`migrate-ledger` too), and ledger reads fetch the root listing and the `results/` subtree only — so a branch an older kernel created from a large default branch reads again without a rebuild.
 - The panel preflight refuses a judge key file that holds the author's key, not only one at the author key's path. The wake skips the panel when the key values match, so a key copied under the verifier's name passed every tick and cost every run its panel.
+- Evals and panel reads measure the tree the seal committed, whatever sparse-checkout state the session left in its workspace. `git worktree add` copies the source worktree's sparse patterns, so a session that narrowed its own checkout also narrowed every tree its evals measured and its judges read, while the sealed commit (and so the PR) kept the whole tree. Kernel git calls now pin sparse checkout off, or to the contract's cone.
+
 - Manual harness upgrades honor `--root`, environment, and `.env` state roots. Retry records are replaced atomically; unreadable or invalid records are logged and ignored. Deploy loads the configured cache root before selecting the uv cache.
 - Harness installers reinstall changed binaries rather than refusing repair; Codex checks its installed binary digest separately from the archive pin, and Hermes runtime reuse checks the interpreter digest.
 
@@ -43,6 +45,7 @@ Versions follow [SemVer](https://semver.org).
   home when moving a run. Drain authors before upgrading or downgrading. Older
   kernels do not enforce this sidecar's writer ownership. See
   [author session control](docs/design/session-control.md) for recovery limits.
+- Contract `workspace.sparse`: a cone-mode sparse checkout for every tree the kernel builds — the attempt's clone, each dispatched eval and launch, and the panel's base and head — for monorepo targets where each full checkout costs gigabytes. The kernel adds the directories holding scope, the roadmap and line memory; seals keep what the cone leaves out; the wake re-imposes the cone before the session resumes. The attempt clone now checks out once, after reading the contract from the base commit.
 
 - Packaged `harnesses.toml` owns Claude, Codex, and Hermes pins. `outerloop harness status` reports installed versions, paths, drift, and operator overrides; `harness upgrade [name...]` verifies versioned installations before atomically recording their paths. Successful kernel deploys upgrade only configured backends; failures retain the previous installation.
 
@@ -50,6 +53,8 @@ Versions follow [SemVer](https://semver.org).
 - Read-only `outerloop limits` reports operator ceilings and fleet-owned running/pending GPU usage.
 
 ### Changed
+
+- Upgrading: `workspace.sparse` adds no run state; runs without it keep whole-tree workspaces, and a declared cone applies from the base contract of each run. Older kernels reject a contract carrying `workspace` (strict keys): upgrade the kernel before adding it. A declared cone needs git 2.34 or newer on the tick and job hosts.
 
 - Upgrading: legacy Codex archive-only markers and Hermes runtimes without interpreter digests are reinstalled on upgrade; legacy Hermes runtimes remain launchable. Existing retry records remain readable, and corrupt records are treated as empty. Run state and in-flight PRs are unchanged; rollback leaves the additional digest files unused.
 

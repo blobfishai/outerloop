@@ -336,6 +336,22 @@ class StewardScope(_StrictModel):
     allowed: list[str] = Field(min_length=1)
 
 
+class WorkspaceSpec(_StrictModel):
+    """How much of the target every tree the kernel builds checks out: the
+    session's clone, each dispatched job's snapshot, the panel's base and
+    head. `sparse` lists repo-relative DIRECTORIES for a cone-mode sparse
+    checkout — root-level files, everything under each directory, and the
+    files directly inside its parents; the kernel adds each scope directory,
+    the files beside each scope file and the roadmap, and the research
+    line's memory (sparse.py).
+    Empty (the default) checks out the whole tree. A cone is not a
+    permission: scope still decides what may change, and a benchmark that
+    needs a path outside the cone fails the same way on both sides of the
+    gate. For monorepo targets, where each full checkout costs gigabytes."""
+
+    sparse: list[str] = Field(default_factory=list, max_length=256)
+
+
 class Contract(_StrictModel):
     benchmarks: list[Benchmark] = Field(min_length=1)
     budgets: Budgets
@@ -343,6 +359,7 @@ class Contract(_StrictModel):
     roadmap: str = Field(min_length=1)
     suite: SuiteAggregate | None = None
     steward: StewardScope | None = None
+    workspace: WorkspaceSpec = Field(default_factory=WorkspaceSpec)
     # MERGE POLICY — the autonomy mode dial (docs/design/headline.md), the
     # target owner's declaration like a harness permission mode:
     #   manual (default): the bot opens PRs and arms auto-merge only when a
@@ -501,4 +518,8 @@ def load_contract(text: str, target_repo: str) -> Contract:
                         f"steward path {entry!r} overlaps the record ledger "
                         f"{str(rp)!r} (orchestrator-owned)"
                     )
+    # a cone entry is a checkout path, not a write permission — but the same
+    # load-time rigor applies: a malformed entry fails here, not mid-run
+    for entry in contract.workspace.sparse:
+        normalize_path(entry)
     return contract

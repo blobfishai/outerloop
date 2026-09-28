@@ -661,9 +661,9 @@ def _seed_target(tmp_path: Path, monkeypatch, contract: str) -> Path:
 
     real_clone = Workspace.clone
 
-    def fake_clone(url, dest, auth=None, dry_run=False):
+    def fake_clone(url, dest, auth=None, dry_run=False, checkout=True):
         # Preserve kernel auth: ending snapshots refuse unauthenticated workspaces.
-        return real_clone(str(bare), dest, auth=auth, dry_run=dry_run)
+        return real_clone(str(bare), dest, auth=auth, dry_run=dry_run, checkout=checkout)
 
     monkeypatch.setattr(climb_mod.Workspace, "clone", staticmethod(fake_clone))
     return bare
@@ -1317,7 +1317,7 @@ def test_clone_crash_ends_record_and_reports_to_issue(tmp_path, monkeypatch) -> 
     """A crash BEFORE the contained call (clone/contract/claim) must end the
     record and surface on the issue — not strand `running`."""
 
-    def exploding_clone(url, dest, auth=None, dry_run=False):
+    def exploding_clone(url, dest, auth=None, dry_run=False, checkout=True):
         raise OSError(122, "Disk quota exceeded")
 
     monkeypatch.setattr(climb_mod.Workspace, "clone", staticmethod(exploding_clone))
