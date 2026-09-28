@@ -2729,11 +2729,10 @@ def resume_run(
         # gate still credits that improvement against the old baseline. A
         # research line can have its own measured tip; its existing advance
         # check below owns that pin instead.
-        # The measured line tip can carry a prior author's contract edits.
-        # Classify from the launch's trusted base, falling back to the fetched
-        # base for legacy records that predate the launch ref.
-        contract_base = _rev(ws, BASE_REF) or pinned_tip
-        prior_contract = load_contract(contract_at(ws, contract_base), record.target)
+        # A measured line tip can carry a prior author's contract edits, and
+        # the author can retarget the checkout's launch ref. Classify from
+        # the canonical base fetched above, including for legacy records.
+        prior_contract = load_contract(contract_at(ws, pinned_tip), record.target)
         prior_bench = _benchmark(prior_contract, record.benchmark)
         refresh_measurement_base = not _line_ref_for(prior_bench, record.agent_id)
 

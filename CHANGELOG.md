@@ -13,7 +13,7 @@ Versions follow [SemVer](https://semver.org).
   can no longer pass preflight while comparing against the old baseline.
   The submit check also compares the gate's actual base with changes folded
   during a turn, checkpointing before measuring an outdated pair. Research-line
-  ownership comes from the trusted launch contract, so earlier line edits cannot
+  ownership comes from the canonical base contract, so earlier line edits cannot
   reset its baseline. Already-dispatched candidate pairs keep their pins;
   moves outside a sparse cone still require no fold.
   Upgrading: existing author-sleep records need no migration. Their next wake

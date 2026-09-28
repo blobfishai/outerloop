@@ -93,11 +93,11 @@ def test_non_pr_author_wake_refreshes_measured_base(tmp_path, monkeypatch, spars
     assert seen == [expected]
 
 
-@pytest.mark.parametrize("launch_ref", [False, True])
+@pytest.mark.parametrize("launch_ref", [False, True, "retargeted"])
 def test_line_contract_edits_cannot_reset_the_measured_base(tmp_path, monkeypatch, launch_ref):
     """A prior author can disable lines in the measured tip's contract. Only
-    the trusted launch/base history establishes whether this is a line run.
-    Legacy workspaces without the launch ref use the canonical fetched base.
+    canonical fetched base establishes whether this is a line run. A launch
+    ref can be missing in a legacy workspace or retargeted by an author.
     """
     state, run_id = _write_parked_candidate(
         tmp_path, monkeypatch, contract=CONTRACT_LINES_DISPATCH, agent_id="agent-02"
@@ -116,6 +116,8 @@ def test_line_contract_edits_cannot_reset_the_measured_base(tmp_path, monkeypatc
     _git(workspace, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "earlier line")
     line_tip = _git(workspace, "rev-parse", "HEAD").strip()
     assert line_tip != launch_base
+    if launch_ref == "retargeted":
+        _git(workspace, "update-ref", attempt.BASE_REF, line_tip)
     save_record(
         state,
         replace(
