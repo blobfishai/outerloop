@@ -1245,6 +1245,124 @@ def test_inline_review_submit_uses_fresh_base(review_run, monkeypatch, contains_
         assert latest.state == PARKED
 
 
+@pytest.mark.parametrize(
+    "moves, when",
+    [
+        (("robofish/clip.txt",), "before-wake"),
+        (("robofish/clip.txt",), "during-leg"),
+        (("src/pilot/solvers/other.py",), "before-wake"),
+        (("src/pilot/solvers/other.py",), "during-leg"),
+        # an in-cone change the PR never absorbed stays visible behind a later outside one
+        (("src/pilot/solvers/other.py", "robofish/clip.txt"), "before-wake"),
+    ],
+)
+def test_review_wake_needs_no_fold_for_a_base_move_outside_the_cone(
+    review_run, tmp_path, monkeypatch, moves, when
+):
+    """Another team lands on the base before the review wake or during the
+    author's leg. A move outside the kernel's cone leaves the pin on what the
+    PR already holds: the gate measures there, never refuses, and the PR is
+    updated. A move the cone can see still needs the fold, even behind a
+    later move outside it."""
+    from outerloop.compute import LocalCompute
+    from outerloop.inbox import pending
+    from outerloop.measure import DispatchSettings
+    from outerloop.syscall_cli import main
+
+    root, bare = review_run
+    ws = run_dir(root, "tsp-r1") / "ws"
+    _git(ws, "checkout", "-q", "-B", "declare", "origin/main")
+    (ws / ".outerloop.yaml").write_text(CONTRACT + "workspace:\n  sparse: [src/pilot/solvers]\n")
+    _git(ws, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "declare the cone")
+    pin = _git(ws, "rev-parse", "HEAD").strip()
+    _git(ws, "push", "-q", "origin", "HEAD:main")
+    _git(ws, "checkout", "-q", PR_BRANCH)
+    _git(ws, "-c", "user.name=t", "-c", "user.email=t@t", "merge", "-q", "--no-edit", pin)
+    head = _git(ws, "rev-parse", "HEAD").strip()
+    _git(ws, "push", "-q", "origin", f"HEAD:{PR_BRANCH}")
+    other = tmp_path / "other-team"
+    _git(tmp_path, "clone", "-q", str(bare), str(other))
+
+    def land() -> str:
+        for path in moves:
+            (other / path).parent.mkdir(parents=True, exist_ok=True)
+            (other / path).write_text("another team's change\n")
+            _git(other, "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
+            _git(other, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", path)
+        _git(other, "push", "-q", "origin", "HEAD:main")
+        return _git(other, "rev-parse", "HEAD").strip()
+
+    tips = [land()] if when == "before-wake" else []
+    record = load_record(root, "tsp-r1")
+    save_record(root, replace(record, stage={"base_sha": pin}), NOW)
+    measured = []
+
+    class Measurer:
+        def results(self, measures):
+            measured.extend(measures)
+            return {m.name: 14.0 if m.name == "baseline" else 11.0 for m in measures}
+
+    monkeypatch.setattr(DispatchSettings, "measurer", lambda *a, **k: Measurer())
+
+    class GitHub(FakeGitHub):
+        def branch_sha(self, repo, branch):
+            return _git(bare, "rev-parse", f"refs/heads/{branch}").strip()
+
+        def head_contains(self, repo, base, head):
+            return _git(bare, "merge-base", base, head).strip() == base
+
+        def disable_auto_merge(self, *args):
+            return True
+
+    github = GitHub(
+        pr={"state": "open", "base": {"ref": "main"}, "head": {"sha": head, "ref": PR_BRANCH}},
+        comments=[member(101, "please submit the tour change")],
+    )
+
+    class Author(ResumingHarness):
+        def run(self, brief_text, workspace, resume_session_id=None):
+            if self.calls:
+                self.edits = {}
+                return super().run(brief_text, workspace, resume_session_id)
+            session = super().run(brief_text, workspace, resume_session_id)
+            if when == "during-leg":
+                tips.append(land())
+            assert main(["submit"], root=workspace) == 0
+            assert main(["sleep"], root=workspace) == 0
+            return session
+
+    author = Author(edits={"src/pilot/solvers/tsp.py": "submitted\n"})
+    outcome = wake_review(
+        root,
+        record.run_id,
+        author,
+        cast(GitHubClient, github),
+        bot_login=BOT,
+        now=NOW,
+        dispatch=DispatchSettings(compute=LocalCompute(), image="", account="", partition=""),
+    )
+    tip = tips[0]
+    latest = load_record(root, record.run_id)
+    messages = pending(ws.parent, 0)
+    refused = [m for m in messages if m.key.startswith("refused:")]
+    if any(path.startswith("src/") for path in moves):
+        assert outcome.action == "parked" and not measured and refused
+        assert latest.stage["base_sha"] == tip
+        assert any(m.kind == "base-moved" and tip in m.payload["text"] for m in messages)
+        return
+    # The PR-level notice still arrives (it cannot see the cone); the gate
+    # needs no fold, so the author's submit is measured, never refused.
+    assert outcome.action == "replied", outcome.note
+    assert outcome.note == "improved" and not refused
+    assert next(m for m in measured if m.name == "baseline").tree_sha == pin
+    assert latest.stage["base_sha"] == pin
+    pushed = _git(bare, "rev-parse", PR_BRANCH).strip()
+    _git(bare, "merge-base", "--is-ancestor", head, pushed)
+    assert set(_git(bare, "diff", "--name-only", f"{tip}...{pushed}").splitlines()) == {
+        "src/pilot/solvers/tsp.py"
+    }
+
+
 @pytest.mark.parametrize("edit", ["none", "working", "committed"])
 @pytest.mark.parametrize(
     "panel_skip",
@@ -1783,6 +1901,96 @@ def test_publish_folded_pr_diff_excludes_main_changes(review_run, monkeypatch):
 @pytest.mark.parametrize("refusal", ["unfolded", "moved-head", "moved-base", "ancestry-error"])
 def test_publish_refuses_unfolded_candidate_or_moved_pr_head(review_run, monkeypatch, refusal):
     _publish_folded(review_run, monkeypatch, refusal=refusal)
+
+
+@pytest.mark.parametrize(
+    "moved, expected",
+    [
+        ("robofish/clip.txt", "improved"),  # another team's tree: nothing measured moved
+        ("docs/later.md", "publish-refused"),  # beside the roadmap, inside the cone
+        ("src/pilot/solvers/later.py", "publish-refused"),  # inside the scope
+    ],
+)
+def test_publish_to_an_open_pr_ignores_a_base_move_outside_the_cone(
+    review_run, tmp_path, moved, expected
+):
+    """In a busy monorepo the base moves between the gate and the publish.
+    A move outside the kernel's cone changes no measured tree, so the open PR
+    is updated, sealed onto its pin, and its diff reverts nothing; a move
+    the cone can see still refuses, as for a whole tree."""
+    from outerloop.attempt import publish
+    from outerloop.contract import load_contract
+    from outerloop.dispatch import snapshot_tree
+    from outerloop.github import Workspace
+    from outerloop.orchestrator import AttemptResult, RunConfig
+
+    root, bare = review_run
+    path = run_dir(root, "tsp-r1") / "ws"
+    ws = Workspace(root=path, url=str(bare))
+    ws.sparse = ("docs/.outerloop-cone", "src/pilot/solvers")
+    ws.apply_sparse()
+    pin = ws.git("rev-parse", "HEAD").strip()
+    (path / "src/pilot/solvers/pr.py").write_text("prior PR change\n")
+    ws.add_all()
+    ws.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "PR")
+    head = ws.git("rev-parse", "HEAD").strip()
+    ws.git("push", "origin", f"{head}:refs/heads/{PR_BRANCH}")
+    (path / "src/pilot/solvers/tsp.py").write_text("submitted\n")
+    snap = snapshot_tree(ws, head)
+    other = tmp_path / "other-team"
+    _git(tmp_path, "clone", "-q", str(bare), str(other))
+    (other / moved).parent.mkdir(parents=True, exist_ok=True)
+    (other / moved).write_text("landed after the gate\n")
+    _git(other, "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
+    _git(other, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "other team")
+    _git(other, "push", "-q", "origin", "HEAD:main")
+    latest = _git(other, "rev-parse", "HEAD").strip()
+    ws.fetch_origin()
+
+    class GitHub(FakeGitHub):
+        def disable_auto_merge(self, *args):
+            return True
+
+    record = load_record(root, "tsp-r1")
+    outcome = publish(
+        result=AttemptResult(
+            outcome="improved",
+            baseline=14.0,
+            candidate=11.0,
+            candidate_sha=snap.commit,
+            measured_paths=("src/pilot/solvers/tsp.py",),
+        ),
+        ws=ws,
+        workspace=path,
+        run_root=root,
+        run_dir=path.parent,
+        run_id=record.run_id,
+        record=record,
+        config=RunConfig(target=record.target, benchmark="tsp", bot_login=BOT),
+        contract=load_contract(CONTRACT, "org/pilot"),
+        github=cast(
+            GitHubClient, GitHub(pr={"state": "open", "head": {"sha": head, "ref": PR_BRANCH}})
+        ),
+        now=NOW,
+        secrets=(),
+        base_branch="main",
+        base_sha=pin,
+        issue_number=0,
+        line_ref="",
+        date="2026-09-28",
+    )
+
+    assert outcome.outcome == expected
+    pushed = _git(bare, "rev-parse", PR_BRANCH).strip()
+    if expected != "improved":
+        assert pushed == head
+        return
+    _git(bare, "merge-base", "--is-ancestor", pin, pushed)
+    assert _git(bare, "rev-parse", f"{pushed}^{{tree}}").strip() == snap.tree
+    assert set(_git(bare, "diff", "--name-only", f"{latest}...{pushed}").splitlines()) == {
+        "src/pilot/solvers/pr.py",
+        "src/pilot/solvers/tsp.py",
+    }
 
 
 @pytest.mark.parametrize("base", ["main", "release"])
