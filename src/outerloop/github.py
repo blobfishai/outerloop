@@ -363,6 +363,27 @@ class GitHubClient:
         """Whether the head contains the base tip."""
         return self.compare(repo, base, head)["status"] in ("ahead", "identical")
 
+    def compare_files(self, repo: str, base: str, head: str) -> list[str] | None:
+        """The paths `head` changed since its merge-base with `base` (both
+        sides of a rename), or None when the list may be incomplete: GitHub
+        lists at most 300 files."""
+        base_ref = urllib.parse.quote(base, safe="")
+        head_ref = urllib.parse.quote(head, safe="")
+        path = f"/repos/{urllib.parse.quote(repo)}/compare/{base_ref}...{head_ref}"
+        files = self._expect_dict(self._request("GET", path), path).get("files")
+        if not isinstance(files, list) or len(files) >= 300:
+            return None
+        paths: list[str] = []
+        for entry in files:
+            name = entry.get("filename") if isinstance(entry, dict) else None
+            if not isinstance(name, str) or not name:
+                return None
+            paths.append(name)
+            previous = entry.get("previous_filename")
+            if isinstance(previous, str) and previous:
+                paths.append(previous)
+        return paths
+
     def get_file(self, repo: str, path: str, ref: str) -> str:
         """Fetch a file's text at a ref — used to read contracts from the
         default branch, never from PR branches."""

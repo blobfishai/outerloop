@@ -21,6 +21,7 @@ from outerloop.brief import MAX_COMMENT_CHARS, cap, code_fence
 from outerloop.github import GitHubClient, GitHubError, is_own_login
 from outerloop.harness import redact
 from outerloop.markers import has_marker
+from outerloop.sparse import outside
 from outerloop.verifier import VERIFY_MARKER
 
 if TYPE_CHECKING:
@@ -684,6 +685,22 @@ def advance_github_positions(directory: Path, positions: dict[str, int]) -> None
             _write_at(fd, "positions.json", current)
 
 
+def _unseen_by_cone(github: GitHubClient, record: RunRecord, head: str, tip: str) -> bool:
+    """Whether everything the base gained past the PR head lies outside the
+    run's recorded kernel cone (stage "cone", written by the kernel). A whole
+    tree, an unreadable or possibly truncated file list, or a GitHub error
+    counts as seen."""
+    cone = record.stage.get("cone")
+    if not isinstance(cone, list) or not cone or not all(isinstance(d, str) for d in cone):
+        return False
+    try:
+        files = github.compare_files(record.target, head, tip)
+    except GitHubError as exc:
+        log.warning("cannot list the base's new files (GitHub status %s)", exc.status)
+        return False
+    return files is not None and len(outside(files, tuple(cone))) == len(files)
+
+
 def base_moved_key(tip: str) -> str:
     """One message per base tip; the suffix changes when the advice does,
     so a run parked under the old wording still receives the new one."""
@@ -788,6 +805,14 @@ def gather_github_messages(
             stale = not github.head_contains(record.target, tip, head)
         except GitHubError as exc:
             log.warning("cannot compare PR head with base tip (GitHub status %s)", exc.status)
+    if (
+        stale
+        and pr.get("mergeable_state") != "dirty"
+        and _unseen_by_cone(github, record, head, tip)
+    ):
+        # The kernel pins what the head holds and measures the same trees, so
+        # an unseen move needs no fold and must not wake the author.
+        stale = False
     if stale:
         text = base_moved_text(tip, base_ref)
         if pr.get("mergeable_state") == "dirty":

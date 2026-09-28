@@ -144,6 +144,31 @@ def test_compare_rejects_malformed_body(provider: FileTokenProvider, response) -
         client.head_contains("org/repo", "base", "head")
 
 
+@pytest.mark.parametrize(
+    "files, expected",
+    [
+        ([{"filename": "robofish/a.txt"}], ["robofish/a.txt"]),
+        (
+            [{"filename": "src/new.py", "previous_filename": "robofish/old.py"}],
+            ["src/new.py", "robofish/old.py"],
+        ),
+        ([], []),
+        ([{"filename": f"f{i}"} for i in range(300)], None),  # GitHub truncates at 300
+        ([{"filename": ""}], None),
+        (["robofish/a.txt"], None),
+        (None, None),
+    ],
+)
+def test_compare_files_lists_both_sides_or_none(provider: FileTokenProvider, files, expected):
+    response = {"status": "diverged", "ahead_by": 1, "behind_by": 1, "files": files}
+    transport = FakeTransport([response])
+    client = GitHubClient(auth=provider, transport=transport)
+    assert client.compare_files("org/repo", "head", "release/next") == expected
+    assert transport.requests[0].full_url == (
+        "https://api.github.com/repos/org/repo/compare/head...release%2Fnext"
+    )
+
+
 def test_compare_surfaces_unavailable(provider: FileTokenProvider, monkeypatch) -> None:
     import io
     import urllib.error

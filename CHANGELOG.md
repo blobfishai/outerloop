@@ -38,7 +38,13 @@ Versions follow [SemVer](https://semver.org).
   only for an advance the cone can see. Moves the cone can see (root files including the contract,
   and declared or scope directories) still need a fold. Whole-tree contracts count
   every move, and auto-merge still requires the head to contain the base tip.
-  The PR-level base-moved notice cannot see the cone yet.
+- The PR-level base-moved notice no longer wakes a review author for a move the
+  cone cannot see. On a busy repository one run received ten notices in two and
+  a half hours, and most of its wakes were fold churn. The run's stage now keeps
+  the kernel cone. The notice is skipped only when GitHub's complete file list
+  for the move lies wholly outside that cone and the PR has no conflicts. A
+  whole tree, a truncated list (300 files or more), or a GitHub error still
+  notifies.
 
 - Subscription research keeps Codex's native tool host enabled for live web
   search while disabling shell, unified execution, image and extension tools.

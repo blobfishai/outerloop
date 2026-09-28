@@ -693,6 +693,72 @@ def test_check_log_and_base_tip_messages(tmp_path, caplog, tip, dirty, status):
     assert [m for m in pending(tmp_path, 0) if m.kind == "base-moved"] == messages
 
 
+@pytest.mark.parametrize(
+    "cone, files, dirty, notified",
+    [
+        (["src/pilot"], ["robofish/a.txt"], False, False),  # unseen: no notice, no wake
+        (["src/pilot"], ["src/pilot/x.py"], False, True),  # the cone sees it
+        (["src/pilot"], ["top.txt"], False, True),  # root files are in every cone
+        (["src/pilot"], None, False, True),  # the file list may be truncated
+        (["src/pilot"], "error", False, True),  # GitHub could not list it
+        (["src/pilot"], ["robofish/a.txt"], True, True),  # conflicts need the author
+        ([], ["robofish/a.txt"], False, True),  # a whole tree sees every move
+        (None, ["robofish/a.txt"], False, True),  # no recorded cone
+    ],
+)
+def test_base_moved_notice_skips_a_move_the_cone_cannot_see(
+    tmp_path, caplog, cone, files, dirty, notified
+):
+    """A review run is not woken to fold a base move that lies wholly outside
+    the kernel cone its stage records: the kernel pins what the PR holds and
+    measures the same trees. Anything it cannot prove unseen still notifies."""
+    from outerloop.github import GitHubError
+    from outerloop.inbox import gather_github_messages, wake_pending
+
+    stage: dict[str, object] = {"base_sha": "base"}
+    if cone is not None:
+        stage["cone"] = cone
+    record = RunRecord(
+        "run", "org/repo", "task", PARKED, pr_url="https://github.com/org/repo/pull/9", stage=stage
+    )
+    pr = {
+        "head": {"sha": "abc"},
+        "base": {"sha": "base", "ref": "main"},
+        "mergeable_state": "dirty" if dirty else "clean",
+    }
+
+    class GitHub:
+        head_contains = GitHubClient.head_contains
+
+        def compare(self, repo, base, head):
+            return {"status": "diverged", "ahead_by": 1, "behind_by": 1}
+
+        def compare_files(self, repo, base, head):
+            assert (repo, base, head) == ("org/repo", "abc", "tip1234")
+            if files == "error":
+                raise GitHubError(500, "/secret-path", "secret-response")
+            return files
+
+        def branch_sha(self, repo, branch):
+            return "tip1234"
+
+        def list_comments(self, *args):
+            return []
+
+        list_pr_reviews = list_comments
+        list_pr_review_comments = list_comments
+
+        def list_check_runs(self, repo, ref):
+            return []
+
+    gather_github_messages(tmp_path, record, cast(GitHubClient, GitHub()), "bot", 1, pr)
+
+    moved = [m for m in pending(tmp_path, 0) if m.kind == "base-moved"]
+    assert bool(moved) == notified
+    assert wake_pending(tmp_path, record) == notified
+    assert "secret" not in caplog.text
+
+
 def test_v1_envelope_reads_without_rewriting(tmp_path):
     import json
 
