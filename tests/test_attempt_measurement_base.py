@@ -9,6 +9,7 @@ from outerloop.orchestrator import AttemptResult
 from outerloop.roles import author_spec
 from outerloop.runstate import load_record, save_record
 from test_attempt import (
+    CONTRACT_LINES_DISPATCH,
     CONTRACT_SYSCALLS,
     CommentingGitHub,
     NoAuth,
@@ -90,6 +91,67 @@ def test_non_pr_author_wake_refreshes_measured_base(tmp_path, monkeypatch, spars
     )
     assert result.outcome == "no-improvement"
     assert seen == [expected]
+
+
+@pytest.mark.parametrize("launch_ref", [False, True])
+def test_line_contract_edits_cannot_reset_the_measured_base(tmp_path, monkeypatch, launch_ref):
+    """A prior author can disable lines in the measured tip's contract. Only
+    the trusted launch/base history establishes whether this is a line run.
+    Legacy workspaces without the launch ref use the canonical fetched base.
+    """
+    state, run_id = _write_parked_candidate(
+        tmp_path, monkeypatch, contract=CONTRACT_LINES_DISPATCH, agent_id="agent-02"
+    )
+    record = load_record(state, run_id)
+    workspace = state / "runs" / run_id / "ws"
+    launch_base = str(record.stage["base_sha"])
+    if launch_ref:
+        _git(workspace, "update-ref", attempt.BASE_REF, launch_base)
+    else:
+        assert not _git(workspace, "for-each-ref", attempt.BASE_REF).strip()
+    (workspace / ".outerloop.yaml").write_text(
+        CONTRACT_LINES_DISPATCH.replace("    lines: true\n", "")
+    )
+    _git(workspace, "add", ".outerloop.yaml", "src/pilot/solvers/tsp.py")
+    _git(workspace, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "earlier line")
+    line_tip = _git(workspace, "rev-parse", "HEAD").strip()
+    assert line_tip != launch_base
+    save_record(
+        state,
+        replace(
+            record,
+            stage={
+                **record.stage,
+                "phase": "author-sleep",
+                "base_sha": line_tip,
+                "candidate_sha": line_tip,
+                "candidate_ref": "",
+                "syscall_launches": [],
+            },
+        ),
+        1_000_001.0,
+    )
+    seen = []
+
+    def author_leg(config, contract, workspace, harness, measurer, base_sha, snapshot, **kw):
+        assert base_sha == line_tip
+        assert load_record(state, run_id).stage["base_sha"] == line_tip
+        seen.append(base_sha)
+        return AttemptResult(outcome="no-improvement")
+
+    monkeypatch.setattr(attempt, "attempt_once", author_leg)
+    result = attempt.resume_run(
+        state,
+        run_id,
+        dispatch=_fake_dispatch(),
+        github=CommentingGitHub(),  # type: ignore[arg-type]
+        bot_auth=NoAuth(),
+        now=1_000_100.0,
+        harness=ScriptedHarness(edits={}),
+        spec=author_spec(),
+    )
+    assert result.outcome == "no-improvement"
+    assert seen == [line_tip]
 
 
 def test_non_pr_wake_dispatches_the_current_measured_base(tmp_path, monkeypatch):

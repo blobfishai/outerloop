@@ -3600,6 +3600,84 @@ def test_author_sleep_wake_publishes_an_inline_improvement(tmp_path, monkeypatch
     assert _git(wsroot, "for-each-ref", "refs/dispatch/").strip() == ""
 
 
+@pytest.mark.parametrize("during_leg", [False, True])
+def test_author_sleep_wake_never_measures_a_base_older_than_the_fold(
+    tmp_path, monkeypatch, during_leg
+) -> None:
+    """Main moves while a fresh climb sleeps (another team fixes the ruler), and
+    the woken author folds it on their own. The candidate then holds main's
+    change, so a baseline measured at the parked base would credit that change
+    to the author: the gate measures against what the candidate holds, or not
+    at all."""
+    from outerloop.measure import DispatchSettings
+    from outerloop.roles import author_spec
+
+    state, run_id, _, _ = _write_parked_author_sleep(tmp_path, monkeypatch)
+    parked_base = str(load_record(state, run_id).stage["base_sha"])
+    bare = tmp_path / f"origin-{run_id}.git"
+    other = tmp_path / "other-team"
+    _git(tmp_path, "clone", "-q", str(bare), str(other))
+    (other / "src" / "pilot" / "ruler.py").write_text("RULER = 2\n")
+    _git(other, "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
+    _git(other, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "ruler fix")
+    if not during_leg:
+        _git(other, "push", "-q", "origin", "HEAD:main")
+    folded_base = _git(other, "rev-parse", "HEAD").strip()
+    measured = []
+
+    class Measurer:
+        def results(self, measures):
+            measured.extend(measures)
+            return {m.name: 13.0 if m.name == "baseline" else 12.0 for m in measures}
+
+    monkeypatch.setattr(DispatchSettings, "measurer", lambda self, *a, **k: Measurer())
+
+    class FoldingHarness(ScriptedHarness):
+        def run(self, brief_text, workspace, resume_session_id=None):
+            if during_leg:
+                _git(other, "push", "-q", "origin", "HEAD:main")
+            _git(workspace, "fetch", "-q", "origin")
+            _git(
+                workspace,
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "merge",
+                "-q",
+                "--no-edit",
+                "origin/main",
+            )
+            return super().run(brief_text, workspace, resume_session_id)
+
+    def wake(harness, now):
+        return resume_run(
+            state,
+            run_id,
+            dispatch=_fake_dispatch(),
+            github=CommentingGitHub(),  # type: ignore[arg-type]
+            bot_auth=NoAuth(),
+            now=now,
+            harness=harness,
+            spec=author_spec(),
+        )
+
+    edits = {"src/pilot/solvers/tsp.py": "def solve(): return 'polished'\n"}
+    first = wake(FoldingHarness(submit=True, edits=edits), 1_000_100.0)
+
+    if during_leg:
+        # A fold past the wake's pin checkpoints before any measurement.
+        assert first.outcome == "parked" and not measured
+        assert load_record(state, run_id).stage["base_sha"] == folded_base
+        final = wake(ScriptedHarness(submit=True, edits=edits), 1_000_200.0)
+    else:
+        # The wake refreshed the measured base before starting the author.
+        final = first
+
+    baselines = [m.tree_sha for m in measured if m.name == "baseline"]
+    assert final.outcome == "improved" and baselines == [folded_base], (parked_base, baselines)
+
+
 def test_author_sleep_wake_keeps_the_submit_report_on_the_pr(tmp_path, monkeypatch) -> None:
     """A submitted park woken with its gate result whose session ends without
     submitting again still shows the author's submit report on the PR."""
