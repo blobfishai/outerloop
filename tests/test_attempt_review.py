@@ -1921,6 +1921,46 @@ def test_publish_refuses_unfolded_candidate_or_moved_pr_head(review_run, monkeyp
     _publish_folded(review_run, monkeypatch, refusal=refusal)
 
 
+def _publish_to_open_pr(root, ws, path, snap, head, pin, measured=("src/pilot/solvers/tsp.py",)):
+    """Publish a sealed candidate to the fixture's open PR, pinned at `pin`."""
+    from outerloop.attempt import publish
+    from outerloop.contract import load_contract
+    from outerloop.orchestrator import AttemptResult, RunConfig
+
+    class GitHub(FakeGitHub):
+        def disable_auto_merge(self, *args):
+            return True
+
+    record = load_record(root, "tsp-r1")
+    return publish(
+        result=AttemptResult(
+            outcome="improved",
+            baseline=14.0,
+            candidate=11.0,
+            candidate_sha=snap.commit,
+            measured_paths=tuple(measured),
+        ),
+        ws=ws,
+        workspace=path,
+        run_root=root,
+        run_dir=path.parent,
+        run_id=record.run_id,
+        record=record,
+        config=RunConfig(target=record.target, benchmark="tsp", bot_login=BOT),
+        contract=load_contract(CONTRACT, "org/pilot"),
+        github=cast(
+            GitHubClient, GitHub(pr={"state": "open", "head": {"sha": head, "ref": PR_BRANCH}})
+        ),
+        now=NOW,
+        secrets=(),
+        base_branch="main",
+        base_sha=pin,
+        issue_number=0,
+        line_ref="",
+        date="2026-09-28",
+    )
+
+
 @pytest.mark.parametrize(
     "moved, expected",
     [
@@ -1936,11 +1976,8 @@ def test_publish_to_an_open_pr_ignores_a_base_move_outside_the_cone(
     A move outside the kernel's cone changes no measured tree, so the open PR
     is updated, sealed onto its pin, and its diff reverts nothing; a move
     the cone can see still refuses, as for a whole tree."""
-    from outerloop.attempt import publish
-    from outerloop.contract import load_contract
     from outerloop.dispatch import snapshot_tree
     from outerloop.github import Workspace
-    from outerloop.orchestrator import AttemptResult, RunConfig
 
     root, bare = review_run
     path = run_dir(root, "tsp-r1") / "ws"
@@ -1965,38 +2002,7 @@ def test_publish_to_an_open_pr_ignores_a_base_move_outside_the_cone(
     latest = _git(other, "rev-parse", "HEAD").strip()
     ws.fetch_origin()
 
-    class GitHub(FakeGitHub):
-        def disable_auto_merge(self, *args):
-            return True
-
-    record = load_record(root, "tsp-r1")
-    outcome = publish(
-        result=AttemptResult(
-            outcome="improved",
-            baseline=14.0,
-            candidate=11.0,
-            candidate_sha=snap.commit,
-            measured_paths=("src/pilot/solvers/tsp.py",),
-        ),
-        ws=ws,
-        workspace=path,
-        run_root=root,
-        run_dir=path.parent,
-        run_id=record.run_id,
-        record=record,
-        config=RunConfig(target=record.target, benchmark="tsp", bot_login=BOT),
-        contract=load_contract(CONTRACT, "org/pilot"),
-        github=cast(
-            GitHubClient, GitHub(pr={"state": "open", "head": {"sha": head, "ref": PR_BRANCH}})
-        ),
-        now=NOW,
-        secrets=(),
-        base_branch="main",
-        base_sha=pin,
-        issue_number=0,
-        line_ref="",
-        date="2026-09-28",
-    )
+    outcome = _publish_to_open_pr(root, ws, path, snap, head, pin)
 
     assert outcome.outcome == expected
     pushed = _git(bare, "rev-parse", PR_BRANCH).strip()
@@ -2015,11 +2021,8 @@ def test_publish_to_an_open_pr_refuses_a_rewritten_base(review_run, tmp_path):
     """A base rewritten under the pin, so that the fresh tip no longer descends
     from it, is refused even when every difference lies outside the cone:
     publishing would restore the dropped commit's files."""
-    from outerloop.attempt import publish
-    from outerloop.contract import load_contract
     from outerloop.dispatch import snapshot_tree
     from outerloop.github import Workspace
-    from outerloop.orchestrator import AttemptResult, RunConfig
 
     root, bare = review_run
     path = run_dir(root, "tsp-r1") / "ws"
@@ -2052,38 +2055,58 @@ def test_publish_to_an_open_pr_refuses_a_rewritten_base(review_run, tmp_path):
     land("robofish/clip.txt", force=True)
     ws.fetch_origin()
 
-    class GitHub(FakeGitHub):
-        def disable_auto_merge(self, *args):
-            return True
+    outcome = _publish_to_open_pr(root, ws, path, snap, head, pin)
 
-    record = load_record(root, "tsp-r1")
-    outcome = publish(
-        result=AttemptResult(
-            outcome="improved",
-            baseline=14.0,
-            candidate=11.0,
-            candidate_sha=snap.commit,
-            measured_paths=("src/pilot/solvers/tsp.py",),
-        ),
-        ws=ws,
-        workspace=path,
-        run_root=root,
-        run_dir=path.parent,
-        run_id=record.run_id,
-        record=record,
-        config=RunConfig(target=record.target, benchmark="tsp", bot_login=BOT),
-        contract=load_contract(CONTRACT, "org/pilot"),
-        github=cast(
-            GitHubClient, GitHub(pr={"state": "open", "head": {"sha": head, "ref": PR_BRANCH}})
-        ),
-        now=NOW,
-        secrets=(),
-        base_branch="main",
-        base_sha=pin,
-        issue_number=0,
-        line_ref="",
-        date="2026-09-28",
-    )
+    assert outcome.outcome == "publish-refused"
+    assert _git(bare, "rev-parse", PR_BRANCH).strip() == head
+
+
+@pytest.mark.parametrize("rewrite", ["sibling", "back-to-pin"])
+def test_publish_to_an_open_pr_refuses_a_base_rewritten_under_a_fold(review_run, tmp_path, rewrite):
+    """The author folded a base that was rewritten away after the gate, onto
+    a sibling or right back to the pin. The sealed commit still holds that
+    base's files, which against the current base would publish as the
+    author's change: refused."""
+    from outerloop.dispatch import snapshot_tree
+    from outerloop.github import Workspace
+
+    root, bare = review_run
+    path = run_dir(root, "tsp-r1") / "ws"
+    other = tmp_path / "other-team"
+    _git(tmp_path, "clone", "-q", str(bare), str(other))
+    pin = _git(other, "rev-parse", "HEAD").strip()
+
+    def land(name: str, *, force: bool = False) -> str:
+        (other / name).parent.mkdir(parents=True, exist_ok=True)
+        (other / name).write_text(f"{name}\n")
+        _git(other, "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
+        _git(other, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", name)
+        _git(other, "push", "-q", *(["--force"] if force else []), "origin", "HEAD:main")
+        return _git(other, "rev-parse", "HEAD").strip()
+
+    ws = Workspace(root=path, url=str(bare))
+    ws.sparse = ("docs/.outerloop-cone", "src/pilot/solvers")
+    ws.apply_sparse()
+    (path / "src/pilot/solvers/pr.py").write_text("prior PR change\n")
+    ws.add_all()
+    ws.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "PR")
+    head = ws.git("rev-parse", "HEAD").strip()
+    ws.git("push", "origin", f"{head}:refs/heads/{PR_BRANCH}")
+    folded = land("robofish/clip.txt")
+    ws.fetch_origin()
+    ws.git("-c", "user.name=t", "-c", "user.email=t@t", "merge", "-q", "--no-edit", folded)
+    (path / "src/pilot/solvers/tsp.py").write_text("submitted\n")
+    snap = snapshot_tree(ws, ws.git("rev-parse", "HEAD").strip())
+    # what the gate measured while the folded base was still the base
+    measured = ("src/pilot/solvers/pr.py", "src/pilot/solvers/tsp.py")
+    _git(other, "reset", "-q", "--hard", pin)
+    if rewrite == "sibling":
+        land("robofish/other.txt", force=True)
+    else:
+        _git(other, "push", "-q", "--force", "origin", "HEAD:main")
+    ws.fetch_origin()
+
+    outcome = _publish_to_open_pr(root, ws, path, snap, head, pin, measured)
 
     assert outcome.outcome == "publish-refused"
     assert _git(bare, "rev-parse", PR_BRANCH).strip() == head

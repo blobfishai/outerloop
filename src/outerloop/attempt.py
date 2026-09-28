@@ -3859,10 +3859,29 @@ def publish(
                     # or a later base the author folded, never an unseen tip.
                     folded = ws.git("merge-base", result.candidate_sha, fresh_base).strip()
                     common = ws.git("merge-base", folded, head).strip()
+                    # Against the base it lands on, the candidate may change only
+                    # what the gate measured or the PR already changes: content
+                    # of a base rewritten after the gate must never publish as
+                    # the author's change.
+                    base_ref = f"refs/remotes/origin/{base_branch}"
+                    landing = submission_paths(
+                        ws, base_ref, result.candidate_sha, exclude_memory=bool(line_ref)
+                    )
+                    published = submission_paths(ws, base_ref, head, exclude_memory=bool(line_ref))
                 except Exception as exc:
                     return refuse(
                         "Publish refused: cannot confirm PR base ancestry.",
                         quoted_text=redact(str(exc), secrets),
+                    )
+                unmeasured = sorted(set(landing) - set(result.measured_paths) - set(published))
+                if unmeasured:
+                    return refuse(
+                        "Publish refused: against the current base, the sealed commit "
+                        "also changes paths the gate did not measure; the base was "
+                        "rewritten under it.",
+                        head,
+                        moved=True,
+                        quoted_text="\n".join(unmeasured[:20]),
                     )
                 parents = ["-p", head]
                 if common != folded:
