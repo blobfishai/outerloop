@@ -694,38 +694,62 @@ def test_check_log_and_base_tip_messages(tmp_path, caplog, tip, dirty, status):
 
 
 @pytest.mark.parametrize(
-    "cone, files, dirty, notified",
+    "case, notified",
     [
-        (["src/pilot"], ["robofish/a.txt"], False, False),  # unseen: no notice, no wake
-        (["src/pilot"], ["src/pilot/x.py"], False, True),  # the cone sees it
-        (["src/pilot"], ["top.txt"], False, True),  # root files are in every cone
-        (["src/pilot"], None, False, True),  # the file list may be truncated
-        (["src/pilot"], "error", False, True),  # GitHub could not list it
-        (["src/pilot"], ["robofish/a.txt"], True, True),  # conflicts need the author
-        ([], ["robofish/a.txt"], False, True),  # a whole tree sees every move
-        (None, ["robofish/a.txt"], False, True),  # no recorded cone
+        ("unseen", False),  # wholly outside the recorded cone, pin still held: no wake
+        ("in-cone", True),  # the cone sees it
+        ("root-file", True),  # root files are in every cone
+        ("truncated", True),  # the file list may be incomplete
+        ("error", True),  # GitHub could not list it
+        ("conflicts", True),  # conflicts need the author
+        ("merge-state-unknown", True),  # no evidence the PR is conflict-free
+        ("behind", True),  # protection wants the branch updated: the fold itself
+        ("unstable", False),  # failing checks are not a conflict
+        ("whole-tree", True),  # a whole tree sees every move
+        ("no-cone", True),  # no recorded cone
+        ("no-pin", True),  # no recorded pin to hold
+        ("rewritten", True),  # the merge-base is not the recorded pin
+        ("blessed", True),  # automatic merge needs the fold
+        ("bless-waits-on-base", True),  # a fold re-arms the automatic merge
     ],
 )
-def test_base_moved_notice_skips_a_move_the_cone_cannot_see(
-    tmp_path, caplog, cone, files, dirty, notified
-):
+def test_base_moved_notice_skips_a_move_the_cone_cannot_see(tmp_path, caplog, case, notified):
     """A review run is not woken to fold a base move that lies wholly outside
-    the kernel cone its stage records: the kernel pins what the PR holds and
-    measures the same trees. Anything it cannot prove unseen still notifies."""
+    the kernel cone its stage records, while the base still holds the run's
+    pin: the kernel pins what the PR holds and measures the same trees.
+    Anything it cannot prove unseen, or a PR the automatic merge still needs
+    folded, notifies as before."""
     from outerloop.github import GitHubError
     from outerloop.inbox import gather_github_messages, wake_pending
 
-    stage: dict[str, object] = {"base_sha": "base"}
-    if cone is not None:
-        stage["cone"] = cone
+    stage: dict[str, object] = {"base_sha": "pin1234", "cone": ["src/pilot"]}
+    if case == "whole-tree":
+        stage["cone"] = []
+    if case == "no-cone":
+        del stage["cone"]
+    if case == "no-pin":
+        del stage["base_sha"]
     record = RunRecord(
-        "run", "org/repo", "task", PARKED, pr_url="https://github.com/org/repo/pull/9", stage=stage
+        "run",
+        "org/repo",
+        "task",
+        PARKED,
+        pr_url="https://github.com/org/repo/pull/9",
+        stage=stage,
+        auto_blessed_head="abc" if case == "blessed" else "",
+        auto_bless_reason_kind="base_moved" if case == "bless-waits-on-base" else "",
     )
     pr = {
         "head": {"sha": "abc"},
         "base": {"sha": "base", "ref": "main"},
-        "mergeable_state": "dirty" if dirty else "clean",
+        "mergeable_state": {
+            "conflicts": "dirty",
+            "merge-state-unknown": "unknown",
+            "behind": "behind",
+            "unstable": "unstable",
+        }.get(case, "clean"),
     }
+    files = {"in-cone": ["src/pilot/x.py"], "root-file": ["top.txt"]}.get(case, ["robofish/a.txt"])
 
     class GitHub:
         head_contains = GitHubClient.head_contains
@@ -735,9 +759,11 @@ def test_base_moved_notice_skips_a_move_the_cone_cannot_see(
 
         def compare_files(self, repo, base, head):
             assert (repo, base, head) == ("org/repo", "abc", "tip1234")
-            if files == "error":
+            if case == "error":
                 raise GitHubError(500, "/secret-path", "secret-response")
-            return files
+            if case == "truncated":
+                return None
+            return files, "older99" if case == "rewritten" else "pin1234"
 
         def branch_sha(self, repo, branch):
             return "tip1234"

@@ -145,22 +145,28 @@ def test_compare_rejects_malformed_body(provider: FileTokenProvider, response) -
 
 
 @pytest.mark.parametrize(
-    "files, expected",
+    "files, merge_base, expected",
     [
-        ([{"filename": "robofish/a.txt"}], ["robofish/a.txt"]),
+        ([{"filename": "robofish/a.txt"}], "m1", (["robofish/a.txt"], "m1")),
         (
             [{"filename": "src/new.py", "previous_filename": "robofish/old.py"}],
-            ["src/new.py", "robofish/old.py"],
+            "m1",
+            (["src/new.py", "robofish/old.py"], "m1"),
         ),
-        ([], []),
-        ([{"filename": f"f{i}"} for i in range(300)], None),  # GitHub truncates at 300
-        ([{"filename": ""}], None),
-        (["robofish/a.txt"], None),
-        (None, None),
+        ([], "m1", ([], "m1")),
+        ([{"filename": f"f{i}"} for i in range(300)], "m1", None),  # GitHub truncates at 300
+        ([{"filename": ""}], "m1", None),
+        (["robofish/a.txt"], "m1", None),
+        (None, "m1", None),
+        ([{"filename": "robofish/a.txt"}], None, None),  # no merge-base to check the pin with
     ],
 )
-def test_compare_files_lists_both_sides_or_none(provider: FileTokenProvider, files, expected):
+def test_compare_files_lists_both_sides_or_none(
+    provider: FileTokenProvider, files, merge_base, expected
+):
     response = {"status": "diverged", "ahead_by": 1, "behind_by": 1, "files": files}
+    if merge_base is not None:
+        response["merge_base_commit"] = {"sha": merge_base}
     transport = FakeTransport([response])
     client = GitHubClient(auth=provider, transport=transport)
     assert client.compare_files("org/repo", "head", "release/next") == expected
