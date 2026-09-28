@@ -6,6 +6,18 @@ Versions follow [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+### Fixed
+
+- CI Hermes provisioning uses the shared runtime installer with anonymous clone retries and matching workflow pins. A source-specific lock protects checkout and runtime mutations; Python discovery excludes active virtualenvs.
+- Panel preflight checks Hermes runtime readiness and explains installation; full init preserves review model and provider settings with environment precedence.
+
+- Contained Hermes sessions can start with read-only source; sessions no longer reinstall dependencies or attempt an editable project build.
+
+### Changed
+
+- Hermes installs a standalone Python and venv once per pinned commit in a sibling runtime, then launches Python directly. Full `init` provisions configured Hermes judges and records their source path; `--no-install-harness` opts out.
+- Upgrading: existing Hermes source-only installs require `bash scripts/install_hermes.sh "$REVIEW_HERMES_REPO"` (or full `outerloop init --force` with Hermes configured) to create the persisted runtime. Run records and resume transcripts are unchanged; rollback leaves the sibling runtime unused.
+
 ## [0.2.1] - 2026-09-25
 
 ### Upgrading
