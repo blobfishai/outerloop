@@ -46,6 +46,7 @@ echo "$@" >> "{shimlog}/uv"
 case "$1" in
   sync) exit 0 ;;
   run)
+    [ "$3" = outerloop ] && exit 0
     echo "tick $(date +%s)" >> "{shimlog}/ticks"
     n=$(wc -l < "{shimlog}/ticks" | tr -d " ")
     [ "$n" -eq 2 ] && echo "# shim edited by a deploy" >> "{home}/scripts/tick_chain.sbatch"
@@ -183,7 +184,8 @@ def test_a_shim_change_on_the_first_deploy_replaces_the_successor(tmp_path: Path
         f"""#!/bin/sh
 case "$1" in
   sync) echo "# shim edited by the first deploy" >> "{home}/scripts/tick_chain.sbatch"; exit 0 ;;
-  run) echo tick >> "{shimlog}/ticks"; touch "{root}/PAUSE"; exit 0 ;;
+  run) [ "$3" = outerloop ] && exit 0
+    echo tick >> "{shimlog}/ticks"; touch "{root}/PAUSE"; exit 0 ;;
 esac
 """
     )
@@ -306,7 +308,11 @@ def test_the_tick_runs_the_installed_environment_without_resyncing(tmp_path: Pat
     home, root, bindir, shimlog = _install(tmp_path)
     proc = _run_chain(home, _resident_env(home, root, bindir))
     assert proc.returncode == 0, proc.stderr
-    runs = [ln for ln in (shimlog / "uv").read_text().splitlines() if ln.startswith("run ")]
+    runs = [
+        ln
+        for ln in (shimlog / "uv").read_text().splitlines()
+        if ln.startswith("run ") and "harness upgrade" not in ln
+    ]
     assert runs, "no tick was run"
     assert all(ln.startswith("run --no-sync python -m outerloop.tick") for ln in runs), runs
 
@@ -736,6 +742,7 @@ esac
     (bindir / "uv").write_text(
         f'''#!/bin/sh
 [ "$1" = run ] || exit 0
+[ "$3" = outerloop ] && exit 0
 echo tick >> "{shimlog}/ticks"
 [ "$(wc -l < "{shimlog}/ticks")" -ge 3 ] && touch "{root}/PAUSE"
 exit 0
@@ -789,6 +796,7 @@ echo "$((500 + n))"
     (bindir / "uv").write_text(
         f'''#!/bin/sh
 [ "$1" = run ] || exit 0
+[ "$3" = outerloop ] && exit 0
 echo tick >> "{shimlog}/ticks"
 [ "$(wc -l < "{shimlog}/ticks")" -ge 3 ] && touch "{root}/PAUSE"
 exit 0
@@ -806,3 +814,35 @@ exit 0
     else:
         assert "successor 501 vanished (GONE); requeued as 502" in log
         assert "handing over to successor 502" in log
+
+
+@pytest.mark.parametrize("mode", ["success", "upgrade_failure", "sync_failure"])
+def test_deploy_harness_upgrade_is_best_effort(tmp_path, mode):
+    home, root, bindir, shimlog = _install(tmp_path)
+    config = home / ".config/outerloop/.env"
+    config.parent.mkdir(parents=True)
+    config.write_text("OUTERLOOP_CLAUDE_BIN=/old/claude\nOUTERLOOP_PANEL=\n")
+    config.chmod(0o600)
+    (bindir / "uv").write_text(f'''#!/bin/sh
+echo "$*" >> "{shimlog}/uv"
+if [ "$1" = sync ]; then
+    [ "{mode}" != sync_failure ]; exit $?
+fi
+if [ "$3" = outerloop ]; then
+    [ "{mode}" != upgrade_failure ] || exit 17
+    echo 'OUTERLOOP_CLAUDE_BIN=/new/claude' >> "{config}"
+    exit 0
+fi
+echo "$OUTERLOOP_CLAUDE_BIN" >> "{shimlog}/path"
+exit 0
+''')
+    proc = _run_chain(home, _env(home, root, bindir))
+    assert proc.returncode == 0, proc.stderr
+    calls = (shimlog / "uv").read_text()
+    assert ("harness upgrade --used" in calls) == (mode != "sync_failure")
+    assert (shimlog / "path").read_text().strip() == (
+        "/new/claude" if mode == "success" else "/old/claude"
+    )
+    if mode == "upgrade_failure":
+        log = next(root.joinpath("logs").glob("tick-*.log")).read_text()
+        assert "harness upgrade failed; previous versions retained" in log

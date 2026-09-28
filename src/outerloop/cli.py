@@ -51,6 +51,14 @@ START_KEYS = (
 # local loop has no deploy step, so start exports them once at launch; a test
 # keeps this list identical to tick_deploy.sh's.
 TICK_ENV_KEYS = (
+    "OUTERLOOP_CLAUDE_VERSION",
+    "OUTERLOOP_CODEX_VERSION",
+    "OUTERLOOP_CLAUDE_SHA256",
+    "OUTERLOOP_CODEX_SHA256",
+    "OUTERLOOP_HERMES_REF",
+    "OUTERLOOP_HERMES_SHA",
+    "OUTERLOOP_CACHE_ROOT",
+    "REVIEW_BACKEND",
     "OUTERLOOP_AUTHOR_BACKEND",
     "OUTERLOOP_AUTHOR_MODEL",
     "OUTERLOOP_CLAUDE_MODEL",
@@ -822,7 +830,12 @@ def main(argv: list[str] | None = None) -> int:
         "--pre", action="store_true", help="include pre-releases even once a stable exists"
     )
     up.add_argument("--dry-run", action="store_true", help="print the command and exit")
+    sub.add_parser("harness", help="inspect or upgrade harness installations", add_help=False)
     argv = sys.argv[1:] if argv is None else list(argv)
+    if argv[:1] == ["harness"]:
+        from outerloop.harness_cli import main as harness_main
+
+        return harness_main(argv[1:])
     if argv[:1] == ["tick"]:
         # the tick entry owns its own parser; hand it the rest untouched
         from outerloop import tick

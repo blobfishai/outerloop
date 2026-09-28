@@ -27,7 +27,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -72,9 +72,39 @@ class CommandResult:
 Runner = Callable[[Sequence[str], int], CommandResult]
 
 
+CACHE_ENV_KEYS = (
+    "XDG_CACHE_HOME",
+    "WANDB_DIR",
+    "WANDB_CACHE_DIR",
+    "UV_CACHE_DIR",
+    "APPTAINER_CACHEDIR",
+)
+
+
+def cache_environment(environ: Mapping[str, str]) -> dict[str, str]:
+    """Per-user caches follow an explicit cache root, or the deployment state root."""
+    root = environ.get("OUTERLOOP_CACHE_ROOT")
+    if not root and environ.get("OUTERLOOP_ROOT"):
+        root = str(Path(environ["OUTERLOOP_ROOT"]) / "cache")
+    values = {key: environ[key] for key in CACHE_ENV_KEYS if key in environ}
+    if root:
+        base = Path(root).expanduser().absolute()
+        for key, suffix in zip(
+            CACHE_ENV_KEYS, ("xdg", "wandb", "wandb-cache", "uv", "apptainer"), strict=True
+        ):
+            values.setdefault(key, str(base / suffix))
+            Path(values[key]).mkdir(parents=True, exist_ok=True)
+    return values
+
+
 def _subprocess_runner(argv: Sequence[str], timeout_s: int) -> CommandResult:
     completed = subprocess.run(
-        list(argv), capture_output=True, text=True, timeout=timeout_s, check=False
+        list(argv),
+        capture_output=True,
+        text=True,
+        timeout=timeout_s,
+        check=False,
+        env={**os.environ, **cache_environment(os.environ)} if argv[0] == "sbatch" else None,
     )
     return CommandResult(completed.returncode, completed.stdout, completed.stderr)
 
@@ -807,6 +837,7 @@ class LocalCompute:
             if k in ("PATH", "HOME", "LANG", "TMPDIR", "SLURM_TMPDIR", "USER", "LOGNAME")
             or (k.startswith(("OUTERLOOP_", "REVIEW_HERMES_")) and not _secret_name(k))
         }
+        job_env.update(cache_environment(os.environ))
         indices = array_indices(spec.array)
         if indices:
             workers = min(len(indices), count // spec.gpus if count else (os.cpu_count() or 1))

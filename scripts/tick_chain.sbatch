@@ -122,6 +122,7 @@ if [ -n "$missing" ]; then
     echo "tick misconfigured; missing:$missing" >&2
     exit 1
 fi
+export UV_CACHE_DIR="${UV_CACHE_DIR:-$OUTERLOOP_ROOT/cache/uv}"
 LOG_DIR="$OUTERLOOP_ROOT/logs"
 mkdir -p "$LOG_DIR" || true
 if [ -w "$LOG_DIR" ]; then
