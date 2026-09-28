@@ -9,6 +9,10 @@ Versions follow [SemVer](https://semver.org).
 ### Fixed
 
 - A session that narrowed its own checkout in a whole-tree workspace no longer has the hidden files sealed as deletions (a false out-of-scope refusal): an absent file the session's index marks skip-worktree reads as unchanged, and evals still measure it.
+- Terminal notebook recovery restores the run's contract cone before sealing,
+  preserving files omitted by sparse checkout. Scope paths absent at the base
+  can become files or directories without being hidden from evals or panels.
+
 - Subscription research keeps Codex's native tool host enabled for live web
   search while disabling shell, unified execution, image and extension tools.
 

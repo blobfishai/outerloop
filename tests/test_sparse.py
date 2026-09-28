@@ -202,7 +202,7 @@ def test_workspace_cone_adds_what_the_agent_must_see(tmp_path):
         f"docs/{FILES_ONLY}",
         f"pkg/a/{FILES_ONLY}",
         "pkg/b",
-        f"pkg/new/{FILES_ONLY}",
+        "pkg/new/mod.py",
     )
     # a scope file brings its siblings, never its directory's subdirectories
     assert in_cone("pkg/a/x.py", cone) and not in_cone("pkg/a/deep/y.py", cone)
@@ -380,3 +380,102 @@ def test_apply_sparse_undoes_a_session_that_dropped_the_cone(tmp_path):
     assert _files(ws.root) == set(FILES)
     ws.apply_sparse()
     assert _files(ws.root) == {p for p in FILES if in_cone(p, ws.sparse)}
+
+
+@pytest.mark.parametrize("sparse", [False, True])
+@pytest.mark.parametrize("recorded_base", [False, True])
+def test_terminal_notebook_preserves_omitted_files(tmp_path, monkeypatch, sparse, recorded_base):
+    """The terminal fallback reconstructs a workspace from a saved run record.
+    Its published notebook must retain omitted files and capture visible edits,
+    including for records without a base SHA and legacy whole-tree contracts.
+    """
+    from outerloop import attempt
+    from outerloop.runstate import (
+        ABORTED,
+        ENDED,
+        RUNNING,
+        RunRecord,
+        load_record,
+        run_dir,
+        save_record,
+    )
+
+    origin = _repo(tmp_path)
+    contract = _contract(
+        scope="scope:\n  allowed: [pkg/a]\n",
+        workspace="workspace:\n  sparse: [pkg/a]\n" if sparse else "",
+    ).replace("direction: max", "direction: max, lines: true")
+    (origin / ".outerloop.yaml").write_text(contract)
+    _git(origin, "add", ".outerloop.yaml")
+    _git(origin, "commit", "-qm", "contract")
+    bare = tmp_path / "origin.git"
+    _git(origin, "clone", "--bare", str(origin), str(bare))
+    base = _git(bare, "rev-parse", "main")
+    root = tmp_path / "runs-root"
+    record = RunRecord(
+        run_id="r1",
+        target="owner/repo",
+        task_title="terminal notebook",
+        state=RUNNING,
+        benchmark="b",
+        stage={"base_sha": base} if recorded_base else {},
+    )
+    save_record(root, record, 1)
+
+    class LocalAuth:
+        def token(self) -> str:
+            return "local-test-token"
+
+    auth = LocalAuth()
+    ws = Workspace.clone(str(bare), run_dir(root, record.run_id) / "ws", auth=auth, checkout=False)
+    ws.sparse = attempt._kernel_cone(
+        ws, load_contract(contract, record.target), base, record.benchmark, record.agent_id
+    )
+    ws.apply_sparse()
+    line = "agents/agent-01"
+    ws.git("checkout", "-q", "-B", line, base)
+    ws.push(line)
+    (ws.root / "pkg/a/x.py").write_text("edited\n")
+    (ws.root / "pkg/a/deep/y.py").unlink()
+    # The terminal must use the saved base contract, not the session's file.
+    (ws.root / ".outerloop.yaml").write_text(_contract())
+    monkeypatch.setattr(attempt, "target_clone_url", lambda target: str(bare))
+
+    attempt.finish_run(root, record, ABORTED, "stopped", 2, auth=auth, bot_login="test-bot")
+
+    assert load_record(root, record.run_id).state == ENDED
+    assert _git(bare, "show", f"{line}:data/stripe/t.json") == "data/stripe/t.json"
+    assert _git(bare, "show", f"{line}:pkg/a/x.py") == "edited"
+    assert set(_git(bare, "diff", "--name-status", base, line).splitlines()) == {
+        "M\t.outerloop.yaml",
+        "M\tpkg/a/x.py",
+        "D\tpkg/a/deep/y.py",
+    }
+
+
+@pytest.mark.parametrize("new_path", ["newpkg", "pkg/newpkg", "pkg/newfile.py"])
+def test_new_scope_subtree_is_present_in_eval_and_panel(tmp_path, new_path):
+    """A scope path absent at the base can become a directory or a file;
+    either must be visible in the same committed tree the kernel measures.
+    """
+    root = _repo(tmp_path)
+    contract = load_contract(
+        _contract(
+            scope=f"scope:\n  allowed: [{new_path}]\n",
+            workspace="workspace:\n  sparse: [src]\n",
+        ),
+        "owner/repo",
+    )
+    cone = workspace_cone(contract, _kind(root))
+    created = new_path if new_path.endswith(".py") else f"{new_path}/module.py"
+    destination = root / created
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text("new implementation\n")
+    ws = Workspace(root=root, sparse=cone)
+    snap = snapshot_tree(ws, ws.git("rev-parse", "HEAD"))
+    assert ws.git("show", f"{snap.commit}:{created}") == "new implementation"
+    assert created in _measured_tree(tmp_path, root, snap.commit, cone)
+    ws.add_worktree(tmp_path / "panel", snap.commit)
+    assert (tmp_path / "panel" / created).read_text() == "new implementation\n"
+    ws.apply_sparse()
+    assert destination.read_text() == "new implementation\n"

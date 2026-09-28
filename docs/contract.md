@@ -48,8 +48,10 @@ and the files directly inside their parents. The kernel adds what the author
 must see: each `scope.allowed` / `steward.allowed` directory whole, the files
 beside each scope file (and beside the roadmap), and the research line's
 memory — so a one-file scope never drags in its package's unrelated
-subdirectories. Each listed entry must be a directory at the base, or the
-attempt fails before its session starts.
+subdirectories. A scope path absent at the base is included as a possible
+subtree, so newly created files and directories remain visible to evals and
+judges. Each explicitly listed `workspace.sparse` entry must be a directory at
+the base, or the attempt fails before its session starts.
 
 A cone is not a permission: scope still decides what may change. A benchmark
 that needs a path outside the cone fails on both sides of the gate, so name

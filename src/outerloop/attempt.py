@@ -5386,9 +5386,12 @@ def finish_run(
     if not snapshot_attempted and ws is not None and ws.root.is_dir():
         line_ref = f"agents/{record.agent_id}"
         try:
-            contract = load_contract(
-                contract_at(ws, str(record.stage.get("base_sha") or "HEAD")), record.target
-            )
+            base_sha = str(record.stage.get("base_sha") or "HEAD")
+            contract = load_contract(contract_at(ws, base_sha), record.target)
+            # Terminal recovery reconstructs the workspace without its in-memory
+            # cone. Restore the contract's view before sealing so omitted files
+            # remain unchanged. Do not re-checkout the session's final edits.
+            ws.sparse = _kernel_cone(ws, contract, base_sha, record.benchmark, record.agent_id)
             bench = _benchmark(contract, record.benchmark)
             line_ref = _line_ref_for(bench, record.agent_id)
             _push_line_snapshot(ws, line_ref, record.run_id, ending, secrets, bot_login=bot_login)

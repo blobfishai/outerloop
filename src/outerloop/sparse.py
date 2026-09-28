@@ -52,12 +52,12 @@ def workspace_cone(
     for a whole-tree checkout.
 
     The cone is the declared directories plus what an agent must see: each
-    scope directory (solver and steward) whole, and for a scope file, the
-    roadmap, or a path absent at the base (one the session may create), the
-    files directly beside it (FILES_ONLY); plus the research line's memory
-    folder when lines are on (`line_dirs`). Root-level files are always in a
-    cone. A declared entry that is not a directory at the base is a contract
-    error, never a silently empty tree."""
+    scope directory (solver and steward) whole, and for a scope file or the
+    roadmap, the files directly beside it (FILES_ONLY). An absent scope path
+    may become a file or directory, so include its whole subtree. Also include
+    the research line's memory folder when lines are on (`line_dirs`). Root-level
+    files are always in a cone. A declared entry that is not a directory at the
+    base is a contract error, never a silently empty tree."""
     declared = contract.workspace.sparse
     if not declared:
         return ()
@@ -70,7 +70,9 @@ def workspace_cone(
     steward = contract.steward.allowed if contract.steward is not None else []
     for entry in (*contract.scope.allowed, *steward, contract.roadmap):
         path = str(normalize_path(entry))
-        if kind(path) == "tree":
+        if kind(path) in ("tree", None):
+            # A path absent at the base may become a directory. Including the
+            # path itself also includes a future file there through its parent.
             dirs.append(path)
         else:
             parent = path.rpartition("/")[0]
