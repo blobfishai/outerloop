@@ -147,8 +147,19 @@ def plan_measures(
     return plan
 
 
-def _baseline_cache_path(cache_dir: Path, benchmark: str, base_sha: str) -> Path:
-    return cache_dir / f"{benchmark}@{base_sha}.json"
+def _checkout_key(sparse: tuple[str, ...]) -> str:
+    # Pre-policy kernels could evaluate a session-narrowed checkout while
+    # recording the same committed SHA. Never reuse those results, even for
+    # a whole-tree contract. The cone also changes what the command can read.
+    payload = json.dumps(["kernel-cone-v1", sparse], separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _baseline_cache_path(
+    cache_dir: Path, benchmark: str, base_sha: str, sparse: tuple[str, ...]
+) -> Path:
+    # Keep prior-policy and other-cone artifacts intact for provenance.
+    return cache_dir / f"checkout-{_checkout_key(sparse)}" / f"{benchmark}@{base_sha}.json"
 
 
 # how long a finished job's files may lag the scheduler's terminal state on a
@@ -181,6 +192,7 @@ def read_baseline_cache(
     metric: str = "",
     seed_env: str = "",
     gpus: int = 0,
+    sparse: tuple[str, ...] = (),
 ) -> dict[str, Any] | None:
     """The cached base-tree measurement for (benchmark, base sha), or None.
     The entry must have been measured under the SAME determinants the
@@ -192,7 +204,7 @@ def read_baseline_cache(
     entry is only ever written from an orchestrator-measured value (below),
     never from anything an author produced."""
     try:
-        data = json.loads(_baseline_cache_path(cache_dir, benchmark, base_sha).read_text())
+        data = json.loads(_baseline_cache_path(cache_dir, benchmark, base_sha, sparse).read_text())
     except (OSError, ValueError):
         return None
     if not isinstance(data, dict) or "value" not in data:
@@ -202,7 +214,8 @@ def read_baseline_cache(
     except (TypeError, ValueError):
         return None
     if (
-        data.get("image", "") != image
+        data.get("checkout") != _checkout_key(sparse)
+        or data.get("image", "") != image
         or data.get("command", "") != command
         or data.get("metric", "") != metric
         or data.get("seed_env", "") != seed_env
@@ -225,6 +238,7 @@ def write_baseline_cache(
     metric: str = "",
     seed_env: str = "",
     gpus: int = 0,
+    sparse: tuple[str, ...] = (),
 ) -> None:
     """Record an orchestrator-measured baseline for every later attempt on
     this base, with the determinants it was measured under. Atomic (a
@@ -234,9 +248,9 @@ def write_baseline_cache(
     import os
     import tempfile
 
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    path = _baseline_cache_path(cache_dir, benchmark, base_sha)
-    fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=cache_dir)
+    path = _baseline_cache_path(cache_dir, benchmark, base_sha, sparse)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
     with os.fdopen(fd, "w") as fh:
         json.dump(
             {
@@ -244,6 +258,7 @@ def write_baseline_cache(
                 "seed": seed,
                 "run": run_tag,
                 "base_sha": base_sha,
+                "checkout": _checkout_key(sparse),
                 "image": image,
                 "command": command,
                 "metric": metric,
@@ -308,7 +323,10 @@ class DispatchedMeasurer:
         # only whether it completes.) NUL separators keep the parts unambiguous
         # (`a`+`bc` != `ab`+`c`).
         env = "".join(f"\0{k}={v}" for k, v in sorted(m.env().items()))
-        return f"{self.image}\0{m.name}\0{m.tree_sha}\0{m.command}\0{m.metric}{env}"
+        return (
+            f"{_checkout_key(self.sparse)}\0{self.image}\0{m.name}\0{m.tree_sha}\0"
+            f"{m.command}\0{m.metric}\0{m.gpus}{env}"
+        )
 
     def _slot(self, m: Measure) -> str:
         # Storage identity = the full determinant, with NOTHING truncated: the

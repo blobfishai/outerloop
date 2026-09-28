@@ -356,7 +356,8 @@ roadmap: docs/roadmap.md
 """
 
 
-def test_cached_baseline_measures_the_base_once_then_only_candidates(tmp_path):
+@pytest.mark.parametrize("sparse", [(), ("src",)])
+def test_cached_baseline_measures_the_base_once_then_only_candidates(tmp_path, sparse):
     """`baseline: cached`: the first attempt on a base measures both and
     records the baseline; the next attempt on the same base measures ONLY its
     candidate and compares against the cache, saying so on the credited
@@ -367,6 +368,7 @@ def test_cached_baseline_measures_the_base_once_then_only_candidates(tmp_path):
     bench = _benchmark(contract, "main")
 
     def decide(m, base=BASE, seed=7):
+        m.sparse = sparse
         return measure_and_decide(
             contract,
             bench,
@@ -386,7 +388,7 @@ def test_cached_baseline_measures_the_base_once_then_only_candidates(tmp_path):
     assert isinstance(out, MeasureOK) and out.baseline == 0.50 and out.baseline_note == ""
     assert first.per_call == [["baseline", "candidate"]]
     entry = read_baseline_cache(
-        tmp_path / "baselines", "main", BASE, command="run main", metric="score"
+        tmp_path / "baselines", "main", BASE, command="run main", metric="score", sparse=sparse
     )
     assert entry and entry["value"] == 0.50 and entry["seed"] == 7 and entry["run"] == "run-1"
 
@@ -439,3 +441,25 @@ def test_cached_baseline_is_keyed_by_image_and_command(tmp_path):
     )
     got = read_baseline_cache(d, "main", BASE, image="/a.sif", command="run main")
     assert got and got["value"] == 0.6 and not list(d.glob("*.tmp"))
+
+
+def test_baseline_cache_preserves_legacy_and_other_cone_artifacts(tmp_path):
+    import json
+
+    from outerloop.measure import read_baseline_cache, write_baseline_cache
+
+    legacy = tmp_path / f"main@{BASE}.json"
+    legacy.write_text(json.dumps({"value": 0.99, "image": "", "command": "run main"}))
+    before = legacy.read_bytes()
+    assert read_baseline_cache(tmp_path, "main", BASE, command="run main") is None
+    write_baseline_cache(tmp_path, "main", BASE, value=0.5, seed=3, run_tag="r", command="run main")
+    assert legacy.read_bytes() == before
+    assert read_baseline_cache(tmp_path, "main", BASE, command="run main", sparse=("src",)) is None
+    write_baseline_cache(
+        tmp_path, "main", BASE, value=0.6, seed=3, run_tag="r", command="run main", sparse=("src",)
+    )
+    whole = read_baseline_cache(tmp_path, "main", BASE, command="run main")
+    cone = read_baseline_cache(tmp_path, "main", BASE, command="run main", sparse=("src",))
+    assert whole and whole["value"] == 0.5
+    assert cone and cone["value"] == 0.6
+    assert legacy.read_bytes() == before
