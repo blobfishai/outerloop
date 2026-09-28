@@ -8,6 +8,8 @@ Versions follow [SemVer](https://semver.org).
 
 ### Fixed
 
+- The `research-log` ledger works on large repositories. The branch was created at the default branch's head and so carried its whole tree; past GitHub's recursive-tree limit every ledger read reported an incomplete tree, publications deferred, and merged runs never ended. It is now created as a parentless commit holding only a README (`migrate-ledger` too), and ledger reads fetch the root listing and the `results/` subtree only — so a branch an older kernel created from a large default branch reads again without a rebuild.
+- The panel preflight refuses a judge key file that holds the author's key, not only one at the author key's path. The wake skips the panel when the key values match, so a key copied under the verifier's name passed every tick and cost every run its panel.
 - Manual harness upgrades honor `--root`, environment, and `.env` state roots. Retry records are replaced atomically; unreadable or invalid records are logged and ignored. Deploy loads the configured cache root before selecting the uv cache.
 - Harness installers reinstall changed binaries rather than refusing repair; Codex checks its installed binary digest separately from the archive pin, and Hermes runtime reuse checks the interpreter digest.
 
@@ -30,6 +32,14 @@ Versions follow [SemVer](https://semver.org).
   Codex subscription workers, explicit native profiles, live session binding,
   terminal-result checks, process-group cleanup, and idempotent follow-up receipts.
 - The self-target guard covers both this maintained fork and its upstream repository.
+- Native Codex and Claude Code authors publish redacted live events and preserve
+  their session identity across failed turns. A durable generation and process
+  group record refuses overlapping author writers after controller restart.
+- Upgrading: legacy run records need no backfill. The first controlled author
+  turn creates `session-control/` beside the workspace; retain it with the native
+  home when moving a run. Drain authors before upgrading or downgrading. Older
+  kernels do not enforce this sidecar's writer ownership. See
+  [author session control](docs/design/session-control.md) for recovery limits.
 
 - Packaged `harnesses.toml` owns Claude, Codex, and Hermes pins. `outerloop harness status` reports installed versions, paths, drift, and operator overrides; `harness upgrade [name...]` verifies versioned installations before atomically recording their paths. Successful kernel deploys upgrade only configured backends; failures retain the previous installation.
 

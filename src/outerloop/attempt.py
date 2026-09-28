@@ -117,6 +117,7 @@ from outerloop.runstate import (
 from outerloop.runstate import (
     run_dir as run_dir_of,
 )
+from outerloop.session_control import controlled_author
 from outerloop.syscall import (
     MAX_ARTIFACT_BYTES,
     MAX_REPLY_CHARS,
@@ -1259,7 +1260,7 @@ def run_author_leg(
         config,
         contract_text,
         workspace,
-        harness,
+        controlled_author(harness, directory),
         measurer,
         base_sha,
         snapshot,
@@ -4469,7 +4470,7 @@ def live_attempt(
                 config,
                 contract_text,
                 workspace,
-                harness,
+                controlled_author(harness, run_dir),
                 measurer,
                 pre_session_sha,
                 snapshot,
