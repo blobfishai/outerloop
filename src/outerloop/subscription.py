@@ -99,12 +99,12 @@ def load_state(path: Path) -> dict[str, Any]:
 
 
 @contextlib.contextmanager
-def exclusive(path: Path) -> Iterator[int]:
+def exclusive(path: Path, *, wait: bool = False) -> Iterator[int]:
     """A stable flock inode; never unlink it, including after release."""
     fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
         except BlockingIOError as exc:
             raise ResearchError(f"resource is already in use: {path}") from exc
         yield fd
@@ -390,12 +390,14 @@ class SubscriptionHarness:
         persist()
         argv = native_command(self.profile, workspace, resume_id or "", self.tools, self.max_turns)
         watch_read, watch_write = os.pipe()
+        done_read, done_write = os.pipe()
         try:
             process = subprocess.Popen(
                 [
                     sys.executable,
                     str(Path(__file__).with_name("_subscription_process.py")),
                     str(watch_read),
+                    str(done_write),
                     ",".join(str(fd) for fd in locks),
                     *argv,
                 ],
@@ -405,22 +407,25 @@ class SubscriptionHarness:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 start_new_session=True,
-                pass_fds=(*locks, watch_read),
+                pass_fds=(*locks, watch_read, done_write),
             )
         except OSError:
             os.close(watch_write)
+            os.close(done_read)
             record.update(status="spawn-error", finished_at=time.time())
             persist()
             raise ResearchError("could not start the configured native CLI") from None
         finally:
             os.close(watch_read)
+            os.close(done_write)
         # Cleanup covers all exceptions after spawn, including a failed disk write.
         try:
             record.update(status="running", pid=process.pid)
             persist()
-            result = self._stream(process, brief, record, turn_dir, persist)
+            result = self._stream(process, brief, record, turn_dir, persist, done_read)
         finally:
             os.close(watch_write)  # supervisor observes EOF and kills the native group
+            os.close(done_read)
             kill_group(process.pid)
             process.wait(timeout=10)
             for pipe in (process.stdin, process.stdout, process.stderr):
@@ -430,7 +435,7 @@ class SubscriptionHarness:
         persist()
         return result
 
-    def _stream(self, process, brief, record, turn_dir, persist) -> SessionResult:
+    def _stream(self, process, brief, record, turn_dir, persist, done_read) -> SessionResult:
         started = last_activity = time.monotonic()
         last_checkpoint = started
         buffers: dict[str, bytes] = {"stdout": b"", "stderr": b""}
@@ -440,6 +445,8 @@ class SubscriptionHarness:
         stop = ""
         final = ""
         turns = 0
+        native_returncode: int | None = None
+        completion_bytes = b""
         events_path = turn_dir / "events.jsonl"
         event_fd = os.open(events_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
 
@@ -505,6 +512,8 @@ class SubscriptionHarness:
 
         try:
             with selectors.DefaultSelector() as selector:
+                os.set_blocking(done_read, False)
+                selector.register(done_read, selectors.EVENT_READ, "completion")
                 for name in ("stdout", "stderr", "stdin"):
                     pipe = getattr(process, name)
                     os.set_blocking(pipe.fileno(), False)
@@ -545,6 +554,23 @@ class SubscriptionHarness:
                                 process.stdin.close()
                             continue
                         chunk = os.read(key.fd, 65536)
+                        if name == "completion":
+                            completion_bytes += chunk
+                            if len(completion_bytes) > 32:
+                                raise ResearchError("invalid native completion receipt")
+                            if b"\n" in completion_bytes:
+                                try:
+                                    native_returncode = int(completion_bytes.strip())
+                                except ValueError:
+                                    raise ResearchError(
+                                        "invalid native completion receipt"
+                                    ) from None
+                                record["provider_returncode"] = native_returncode
+                                selector.unregister(key.fileobj)
+                                kill_group(process.pid)
+                            elif not chunk:
+                                selector.unregister(key.fileobj)
+                            continue
                         if not chunk:
                             selector.unregister(key.fileobj)
                             if name == "stdout" and buffers[name].strip():
@@ -566,14 +592,16 @@ class SubscriptionHarness:
                             raise ResearchError("provider event exceeds size limit")
                 if not stop:
                     try:
-                        code = process.wait(
+                        process.wait(
                             timeout=max(0.001, self.timeout_s - (time.monotonic() - started))
                         )
                     except subprocess.TimeoutExpired:
                         stop, detail = "timeout", "provider closed streams but did not exit"
                     else:
-                        if code:
-                            detail = f"provider exited with status {code}"
+                        if native_returncode is None:
+                            detail = "supervisor exited without a native completion receipt"
+                        elif native_returncode:
+                            detail = f"provider exited with status {native_returncode}"
         except ResearchError as exc:
             stop, detail = "protocol-error", str(exc)
         finally:

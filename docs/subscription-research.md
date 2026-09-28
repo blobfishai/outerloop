@@ -121,6 +121,9 @@ It resumes the exact recorded session, never the most recent session. A repeated
 request ID observes its receipt; using that ID for another prompt is refused.
 Different workers can receive follow-ups concurrently. Accepted but uncertain
 requests block later control until reconciled. They never become implicit success.
+Acceptance and whole-goal snapshots share a short metadata lock. Accepting a
+follow-up publishes incomplete status before the model call, so a concurrent
+reader cannot combine old and new worker states into a false completion.
 
 The runner uses process groups and a separate liveness supervisor. Timeout kills
 the owned group, including children that ignore TERM. Controller death closes the
@@ -128,6 +131,9 @@ liveness pipe and stops the group; supervisor death is detected by the controlle
 and stops the same group. This is local POSIX process control, not a filesystem
 sandbox or cgroup boundary. A descendant deliberately escaping with `setsid`, or
 simultaneous loss of controller and supervisor, requires stronger OS containment.
+After the native leader exits, its supervisor remains alive until cleanup. It
+reports the exit code through a separate pipe that the native CLI cannot write;
+controller loss during the completion handoff still stops background children.
 
 After an abrupt controller exit, a record can still say `running` although the
 supervisor cleaned up. The runner refuses automatic replay because it cannot know

@@ -84,6 +84,20 @@ def _harness(plan: Plan, profile: SubscriptionProfile, worker_dir: Path) -> Subs
 
 
 def snapshot(root: Path) -> dict:
+    # Acceptance can change a previously completed worker back to active. Hold
+    # one short metadata lock over the whole observation so those transitions
+    # cannot produce a mixed-time false positive. Native turns do not hold it.
+    with exclusive(root / "snapshot.lock", wait=True):
+        return _snapshot_unlocked(root)
+
+
+def _publish_snapshot_unlocked(root: Path) -> dict:
+    result = _snapshot_unlocked(root)
+    save_json(root / "result.json", result)
+    return result
+
+
+def _snapshot_unlocked(root: Path) -> dict:
     manifest = load_state(root / "plan.json")
     workers = []
     for spec in manifest["plan"]["workers"]:
@@ -175,9 +189,8 @@ def run_plan(plan: Plan, root: Path, parallel: int) -> dict:
             raise
         finally:
             pool.shutdown(wait=True, cancel_futures=True)
-        result = snapshot(root)
-        save_json(root / "result.json", result)
-        return result
+        with exclusive(root / "snapshot.lock", wait=True):
+            return _publish_snapshot_unlocked(root)
 
 
 def resume(root: Path, worker_id: str, prompt: str, request_id: str) -> dict:
@@ -201,25 +214,27 @@ def resume(root: Path, worker_id: str, prompt: str, request_id: str) -> dict:
         private_dir(requests)
         path = requests / f"{request_id}.json"
         digest = hashlib.sha256(prompt.encode()).hexdigest()
-        if path.exists():
-            if load_state(path).get("prompt_sha256") != digest:
-                raise ResearchError("request ID already belongs to a different prompt")
-            return snapshot(root)
-        if any(load_state(p)["status"] == "accepted" for p in requests.glob("*.json")):
-            raise ResearchError("an earlier accepted request needs reconciliation")
-        state = load_state(worker_dir / "state" / "state.json")
-        if state["status"] in {"starting", "running"} or not state.get("session_id"):
-            raise ResearchError("worker has no finished turn with a resumable identity")
-        # Persist acceptance before application. A lost acknowledgement can only
-        # replay this receipt, never submit the turn again.
-        receipt = {
-            "schema": 1,
-            "request_id": request_id,
-            "prompt_sha256": digest,
-            "status": "accepted",
-            "at": time.time(),
-        }
-        save_json(path, receipt)
+        with exclusive(root / "snapshot.lock", wait=True):
+            if path.exists():
+                if load_state(path).get("prompt_sha256") != digest:
+                    raise ResearchError("request ID already belongs to a different prompt")
+                return _snapshot_unlocked(root)
+            if any(load_state(p)["status"] == "accepted" for p in requests.glob("*.json")):
+                raise ResearchError("an earlier accepted request needs reconciliation")
+            state = load_state(worker_dir / "state" / "state.json")
+            if state["status"] in {"starting", "running"} or not state.get("session_id"):
+                raise ResearchError("worker has no finished turn with a resumable identity")
+            # Acceptance and its published incomplete snapshot commit while new
+            # snapshot readers are excluded. No completed cache survives a start.
+            receipt = {
+                "schema": 1,
+                "request_id": request_id,
+                "prompt_sha256": digest,
+                "status": "accepted",
+                "at": time.time(),
+            }
+            save_json(path, receipt)
+            _publish_snapshot_unlocked(root)
         try:
             result = _harness(plan, profile, worker_dir).run(
                 prompt,
@@ -227,14 +242,15 @@ def resume(root: Path, worker_id: str, prompt: str, request_id: str) -> dict:
                 resume_session_id=state["session_id"],
             )
         except (ResearchError, OSError, subprocess.SubprocessError):
-            receipt.update(status="error", finished_at=time.time())
-            save_json(path, receipt)
+            with exclusive(root / "snapshot.lock", wait=True):
+                receipt.update(status="error", finished_at=time.time())
+                save_json(path, receipt)
+                _publish_snapshot_unlocked(root)
             raise
-        receipt.update(status=result.stop_reason, finished_at=time.time())
-        save_json(path, receipt)
-        result_snapshot = snapshot(root)
-        save_json(root / "result.json", result_snapshot)
-        return result_snapshot
+        with exclusive(root / "snapshot.lock", wait=True):
+            receipt.update(status=result.stop_reason, finished_at=time.time())
+            save_json(path, receipt)
+            return _publish_snapshot_unlocked(root)
 
 
 def main(argv: list[str] | None = None) -> int:

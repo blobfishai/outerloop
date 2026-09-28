@@ -507,3 +507,123 @@ def test_absent_legacy_state_starts_fresh_but_unknown_schema_is_refused(tmp_path
     assert not (adapter.profile.directory / "calls.jsonl").exists()
     path.unlink()
     assert not adapter.run("brief", ws).is_error
+
+
+@pytest.mark.parametrize("index", range(20))
+def test_supervisor_keeps_watching_after_native_leader_exit(tmp_path, index):
+    import select
+
+    import outerloop._subscription_process as supervisor
+
+    profile = fixture_profile(tmp_path, child=True)
+    watch_read, watch_write = os.pipe()
+    done_read, done_write = os.pipe()
+    lock = os.open(tmp_path / "lock", os.O_CREAT | os.O_RDWR, 0o600)
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            supervisor.__file__,
+            str(watch_read),
+            str(done_write),
+            str(lock),
+            *native_command(profile, tmp_path, "", "none", 1),
+        ],
+        env=profile.environment(tmp_path),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        pass_fds=(watch_read, done_write, lock),
+    )
+    os.close(watch_read)
+    os.close(done_write)
+    try:
+        assert process.stdin is not None
+        process.stdin.write(b"brief")
+        process.stdin.close()
+        assert select.select([done_read], [], [], 5)[0]
+        assert os.read(done_read, 32) == b"0\n"
+        # The controller has not acknowledged completion. The old supervisor
+        # exited here, leaving nobody to observe controller loss.
+        assert process.poll() is None
+        child = int((profile.directory / "child.pid").read_text())
+        assert process_alive(child)
+        os.close(watch_write)  # equivalent EOF to SIGKILL of the sole controller
+        watch_write = -1
+        process.wait(timeout=5)
+        assert not process_alive(child)
+    finally:
+        if watch_write >= 0:
+            os.close(watch_write)
+        os.close(done_read)
+        os.close(lock)
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=5)
+
+
+def test_snapshot_and_acceptance_cannot_publish_mixed_time_completion(tmp_path, monkeypatch):
+    import contextlib
+    import threading
+
+    from outerloop import research_cli
+
+    plan = plan_fixture(tmp_path)
+    root = tmp_path / "research"
+    run_plan(plan, root, 2)
+    read_a, release_reader = threading.Event(), threading.Event()
+    accepting, model_entered, finish_model = (threading.Event() for _ in range(3))
+    original_load, original_lock = research_cli.load_state, research_cli.exclusive
+    original_harness = research_cli._harness
+
+    def paused_read(path):
+        if (
+            threading.current_thread().name.startswith("snapshot-reader")
+            and path == root / "codex/state/state.json"
+        ):
+            read_a.set()
+            assert release_reader.wait(5)
+        return original_load(path)
+
+    @contextlib.contextmanager
+    def observed_lock(path, **kwargs):
+        if threading.current_thread().name.startswith("follow") and path.name == "snapshot.lock":
+            accepting.set()
+        with original_lock(path, **kwargs) as fd:
+            yield fd
+
+    def paused_harness(*args):
+        delegate = original_harness(*args)
+
+        class Paused:
+            def run(self, *a, **kw):
+                model_entered.set()
+                assert finish_model.wait(5)
+                return delegate.run(*a, **kw)
+
+        return Paused()
+
+    monkeypatch.setattr(research_cli, "load_state", paused_read)
+    monkeypatch.setattr(research_cli, "exclusive", observed_lock)
+    monkeypatch.setattr(research_cli, "_harness", paused_harness)
+    with (
+        ThreadPoolExecutor(1, thread_name_prefix="snapshot-reader") as reader,
+        ThreadPoolExecutor(1, thread_name_prefix="follow") as follower,
+    ):
+        try:
+            observation = reader.submit(research_cli.snapshot, root)
+            assert read_a.wait(5)
+            follow = follower.submit(resume, root, "claude", "continue", "new")
+            assert accepting.wait(5)
+            assert not model_entered.is_set()
+            assert not (root / "claude/requests/new.json").exists()
+            release_reader.set()
+            assert observation.result(timeout=5)["complete"]
+            assert model_entered.wait(5)
+            assert not load_state(root / "result.json")["complete"]
+            assert not research_cli.snapshot(root)["complete"]
+            finish_model.set()
+            assert follow.result(timeout=5)["complete"]
+        finally:
+            release_reader.set()
+            finish_model.set()
