@@ -1245,6 +1245,142 @@ def test_inline_review_submit_uses_fresh_base(review_run, monkeypatch, contains_
         assert latest.state == PARKED
 
 
+@pytest.mark.parametrize(
+    "moves, when",
+    [
+        (("robofish/clip.txt",), "before-wake"),
+        (("robofish/clip.txt",), "during-leg"),
+        (("src/pilot/solvers/other.py",), "before-wake"),
+        (("src/pilot/solvers/other.py",), "during-leg"),
+        # an in-cone change the PR never absorbed stays visible behind a later outside one
+        (("src/pilot/solvers/other.py", "robofish/clip.txt"), "before-wake"),
+        # the author folds an unseen move anyway; the publish keeps that ancestry
+        (("robofish/clip.txt",), "folded"),
+        (("robofish/clip.txt",), "folded-then-moved"),
+    ],
+)
+@pytest.mark.parametrize("lines", [False, True])
+def test_review_wake_needs_no_fold_for_a_base_move_outside_the_cone(
+    review_run, tmp_path, monkeypatch, moves, when, lines
+):
+    """Another team lands on the base before the review wake or during the
+    author's leg. A move outside the kernel's cone leaves the pin on what the
+    PR already holds: the gate measures there, never refuses, and the PR is
+    updated, with or without a research line. A base the author folds anyway
+    stays an ancestor of the published head, and a later unseen tip never
+    becomes one. A move the cone can see still needs the fold, even behind a
+    later move outside it."""
+    from outerloop.compute import LocalCompute
+    from outerloop.inbox import pending
+    from outerloop.measure import DispatchSettings
+    from outerloop.syscall_cli import main
+
+    root, bare = review_run
+    ws = run_dir(root, "tsp-r1") / "ws"
+    _git(ws, "checkout", "-q", "-B", "declare", "origin/main")
+    contract = CONTRACT.replace("direction: min\n", "direction: min\n    lines: true\n")
+    (ws / ".outerloop.yaml").write_text(
+        (contract if lines else CONTRACT) + "workspace:\n  sparse: [src/pilot/solvers]\n"
+    )
+    _git(ws, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "declare the cone")
+    pin = _git(ws, "rev-parse", "HEAD").strip()
+    _git(ws, "push", "-q", "origin", "HEAD:main")
+    _git(ws, "checkout", "-q", PR_BRANCH)
+    _git(ws, "-c", "user.name=t", "-c", "user.email=t@t", "merge", "-q", "--no-edit", pin)
+    head = _git(ws, "rev-parse", "HEAD").strip()
+    _git(ws, "push", "-q", "origin", f"HEAD:{PR_BRANCH}")
+    other = tmp_path / "other-team"
+    _git(tmp_path, "clone", "-q", str(bare), str(other))
+
+    def land(paths: tuple[str, ...] = moves) -> str:
+        for path in paths:
+            (other / path).parent.mkdir(parents=True, exist_ok=True)
+            (other / path).write_text("another team's change\n")
+            _git(other, "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
+            _git(other, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", path)
+        _git(other, "push", "-q", "origin", "HEAD:main")
+        return _git(other, "rev-parse", "HEAD").strip()
+
+    tips = [land()] if when == "before-wake" else []
+    record = load_record(root, "tsp-r1")
+    save_record(root, replace(record, stage={"base_sha": pin}), NOW)
+    measured = []
+
+    class Measurer:
+        def results(self, measures):
+            measured.extend(measures)
+            return {m.name: 14.0 if m.name == "baseline" else 11.0 for m in measures}
+
+    monkeypatch.setattr(DispatchSettings, "measurer", lambda *a, **k: Measurer())
+
+    class GitHub(FakeGitHub):
+        def branch_sha(self, repo, branch):
+            return _git(bare, "rev-parse", f"refs/heads/{branch}").strip()
+
+        def head_contains(self, repo, base, head):
+            return _git(bare, "merge-base", base, head).strip() == base
+
+        def disable_auto_merge(self, *args):
+            return True
+
+    github = GitHub(
+        pr={"state": "open", "base": {"ref": "main"}, "head": {"sha": head, "ref": PR_BRANCH}},
+        comments=[member(101, "please submit the tour change")],
+    )
+
+    class Author(ResumingHarness):
+        def run(self, brief_text, workspace, resume_session_id=None):
+            if self.calls:
+                self.edits = {}
+                return super().run(brief_text, workspace, resume_session_id)
+            session = super().run(brief_text, workspace, resume_session_id)
+            if when != "before-wake":
+                tips.append(land())
+            if when.startswith("folded"):
+                for step in (
+                    ["fetch", "-q", "origin"],
+                    ["merge", "-q", "--no-edit", "origin/main"],
+                ):
+                    _git(workspace, "-c", "user.name=t", "-c", "user.email=t@t", *step)
+            if when == "folded-then-moved":
+                tips.append(land(("robofish/later.txt",)))
+            assert main(["submit"], root=workspace) == 0
+            assert main(["sleep"], root=workspace) == 0
+            return session
+
+    author = Author(edits={"src/pilot/solvers/tsp.py": "submitted\n"})
+    outcome = wake_review(
+        root,
+        record.run_id,
+        author,
+        cast(GitHubClient, github),
+        bot_login=BOT,
+        now=NOW,
+        dispatch=DispatchSettings(compute=LocalCompute(), image="", account="", partition=""),
+    )
+    tip = tips[0]
+    latest = load_record(root, record.run_id)
+    messages = pending(ws.parent, 0)
+    refused = [m for m in messages if m.key.startswith("refused:")]
+    if any(path.startswith("src/") for path in moves):
+        assert outcome.action == "parked" and not measured and refused
+        assert latest.stage["base_sha"] == tip
+        assert any(m.kind == "base-moved" and tip in m.payload["text"] for m in messages)
+        return
+    # The PR-level notice still arrives (it cannot see the cone); the gate
+    # needs no fold, so the author's submit is measured, never refused.
+    assert outcome.action == "replied", outcome.note
+    assert outcome.note == "improved" and not refused
+    assert next(m for m in measured if m.name == "baseline").tree_sha == pin
+    assert latest.stage["base_sha"] == pin
+    pushed = _git(bare, "rev-parse", PR_BRANCH).strip()
+    parents = _git(bare, "show", "-s", "--format=%P", pushed).split()
+    assert parents == ([head, tip] if when.startswith("folded") else [head])
+    assert set(_git(bare, "diff", "--name-only", f"{tips[-1]}...{pushed}").splitlines()) == {
+        "src/pilot/solvers/tsp.py"
+    }
+
+
 @pytest.mark.parametrize("edit", ["none", "working", "committed"])
 @pytest.mark.parametrize(
     "panel_skip",
@@ -1783,6 +1919,264 @@ def test_publish_folded_pr_diff_excludes_main_changes(review_run, monkeypatch):
 @pytest.mark.parametrize("refusal", ["unfolded", "moved-head", "moved-base", "ancestry-error"])
 def test_publish_refuses_unfolded_candidate_or_moved_pr_head(review_run, monkeypatch, refusal):
     _publish_folded(review_run, monkeypatch, refusal=refusal)
+
+
+def _publish_to_open_pr(root, ws, path, snap, head, pin, measured=("src/pilot/solvers/tsp.py",)):
+    """Publish a sealed candidate to the fixture's open PR, pinned at `pin`."""
+    from outerloop.attempt import publish
+    from outerloop.contract import load_contract
+    from outerloop.orchestrator import AttemptResult, RunConfig
+
+    class GitHub(FakeGitHub):
+        def disable_auto_merge(self, *args):
+            return True
+
+    record = load_record(root, "tsp-r1")
+    return publish(
+        result=AttemptResult(
+            outcome="improved",
+            baseline=14.0,
+            candidate=11.0,
+            candidate_sha=snap.commit,
+            measured_paths=tuple(measured),
+        ),
+        ws=ws,
+        workspace=path,
+        run_root=root,
+        run_dir=path.parent,
+        run_id=record.run_id,
+        record=record,
+        config=RunConfig(target=record.target, benchmark="tsp", bot_login=BOT),
+        contract=load_contract(CONTRACT, "org/pilot"),
+        github=cast(
+            GitHubClient, GitHub(pr={"state": "open", "head": {"sha": head, "ref": PR_BRANCH}})
+        ),
+        now=NOW,
+        secrets=(),
+        base_branch="main",
+        base_sha=pin,
+        issue_number=0,
+        line_ref="",
+        date="2026-09-28",
+    )
+
+
+@pytest.mark.parametrize(
+    "moved, expected",
+    [
+        ("robofish/clip.txt", "improved"),  # another team's tree: nothing measured moved
+        ("docs/later.md", "publish-refused"),  # beside the roadmap, inside the cone
+        ("src/pilot/solvers/later.py", "publish-refused"),  # inside the scope
+    ],
+)
+def test_publish_to_an_open_pr_ignores_a_base_move_outside_the_cone(
+    review_run, tmp_path, moved, expected
+):
+    """In a busy monorepo the base moves between the gate and the publish.
+    A move outside the kernel's cone changes no measured tree, so the open PR
+    is updated, sealed onto its pin, and its diff reverts nothing; a move
+    the cone can see still refuses, as for a whole tree."""
+    from outerloop.dispatch import snapshot_tree
+    from outerloop.github import Workspace
+
+    root, bare = review_run
+    path = run_dir(root, "tsp-r1") / "ws"
+    ws = Workspace(root=path, url=str(bare))
+    ws.sparse = ("docs/.outerloop-cone", "src/pilot/solvers")
+    ws.apply_sparse()
+    pin = ws.git("rev-parse", "HEAD").strip()
+    (path / "src/pilot/solvers/pr.py").write_text("prior PR change\n")
+    ws.add_all()
+    ws.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "PR")
+    head = ws.git("rev-parse", "HEAD").strip()
+    ws.git("push", "origin", f"{head}:refs/heads/{PR_BRANCH}")
+    (path / "src/pilot/solvers/tsp.py").write_text("submitted\n")
+    snap = snapshot_tree(ws, head)
+    other = tmp_path / "other-team"
+    _git(tmp_path, "clone", "-q", str(bare), str(other))
+    (other / moved).parent.mkdir(parents=True, exist_ok=True)
+    (other / moved).write_text("landed after the gate\n")
+    _git(other, "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
+    _git(other, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "other team")
+    _git(other, "push", "-q", "origin", "HEAD:main")
+    latest = _git(other, "rev-parse", "HEAD").strip()
+    ws.fetch_origin()
+
+    outcome = _publish_to_open_pr(root, ws, path, snap, head, pin)
+
+    assert outcome.outcome == expected
+    pushed = _git(bare, "rev-parse", PR_BRANCH).strip()
+    if expected != "improved":
+        assert pushed == head
+        return
+    _git(bare, "merge-base", "--is-ancestor", pin, pushed)
+    assert _git(bare, "rev-parse", f"{pushed}^{{tree}}").strip() == snap.tree
+    assert set(_git(bare, "diff", "--name-only", f"{latest}...{pushed}").splitlines()) == {
+        "src/pilot/solvers/pr.py",
+        "src/pilot/solvers/tsp.py",
+    }
+
+
+def test_publish_to_an_open_pr_refuses_a_rewritten_base(review_run, tmp_path):
+    """A base rewritten under the pin, so that the fresh tip no longer descends
+    from it, is refused even when every difference lies outside the cone:
+    publishing would restore the dropped commit's files."""
+    from outerloop.dispatch import snapshot_tree
+    from outerloop.github import Workspace
+
+    root, bare = review_run
+    path = run_dir(root, "tsp-r1") / "ws"
+    other = tmp_path / "other-team"
+    _git(tmp_path, "clone", "-q", str(bare), str(other))
+    seed = _git(other, "rev-parse", "HEAD").strip()
+
+    def land(name: str, *, force: bool = False) -> str:
+        (other / name).parent.mkdir(parents=True, exist_ok=True)
+        (other / name).write_text(f"{name}\n")
+        _git(other, "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
+        _git(other, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", name)
+        _git(other, "push", "-q", *(["--force"] if force else []), "origin", "HEAD:main")
+        return _git(other, "rev-parse", "HEAD").strip()
+
+    pin = land("robofish/pin.txt")
+    ws = Workspace(root=path, url=str(bare))
+    ws.sparse = ("docs/.outerloop-cone", "src/pilot/solvers")
+    ws.apply_sparse()
+    ws.fetch_origin()
+    ws.git("-c", "user.name=t", "-c", "user.email=t@t", "merge", "-q", "--no-edit", pin)
+    (path / "src/pilot/solvers/pr.py").write_text("prior PR change\n")
+    ws.add_all()
+    ws.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "PR")
+    head = ws.git("rev-parse", "HEAD").strip()
+    ws.git("push", "origin", f"{head}:refs/heads/{PR_BRANCH}")
+    (path / "src/pilot/solvers/tsp.py").write_text("submitted\n")
+    snap = snapshot_tree(ws, head)
+    _git(other, "reset", "-q", "--hard", seed)
+    land("robofish/clip.txt", force=True)
+    ws.fetch_origin()
+
+    outcome = _publish_to_open_pr(root, ws, path, snap, head, pin)
+
+    assert outcome.outcome == "publish-refused"
+    assert _git(bare, "rev-parse", PR_BRANCH).strip() == head
+
+
+@pytest.mark.parametrize("rewrite", ["sibling", "back-to-pin"])
+def test_publish_to_an_open_pr_refuses_a_base_rewritten_under_a_fold(review_run, tmp_path, rewrite):
+    """The author folded a base that was rewritten away after the gate, onto
+    a sibling or right back to the pin. The sealed commit still holds that
+    base's files, which against the current base would publish as the
+    author's change: refused."""
+    from outerloop.dispatch import snapshot_tree
+    from outerloop.github import Workspace
+
+    root, bare = review_run
+    path = run_dir(root, "tsp-r1") / "ws"
+    other = tmp_path / "other-team"
+    _git(tmp_path, "clone", "-q", str(bare), str(other))
+    pin = _git(other, "rev-parse", "HEAD").strip()
+
+    def land(name: str, *, force: bool = False) -> str:
+        (other / name).parent.mkdir(parents=True, exist_ok=True)
+        (other / name).write_text(f"{name}\n")
+        _git(other, "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
+        _git(other, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", name)
+        _git(other, "push", "-q", *(["--force"] if force else []), "origin", "HEAD:main")
+        return _git(other, "rev-parse", "HEAD").strip()
+
+    ws = Workspace(root=path, url=str(bare))
+    ws.sparse = ("docs/.outerloop-cone", "src/pilot/solvers")
+    ws.apply_sparse()
+    (path / "src/pilot/solvers/pr.py").write_text("prior PR change\n")
+    ws.add_all()
+    ws.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "PR")
+    head = ws.git("rev-parse", "HEAD").strip()
+    ws.git("push", "origin", f"{head}:refs/heads/{PR_BRANCH}")
+    folded = land("robofish/clip.txt")
+    ws.fetch_origin()
+    ws.git("-c", "user.name=t", "-c", "user.email=t@t", "merge", "-q", "--no-edit", folded)
+    (path / "src/pilot/solvers/tsp.py").write_text("submitted\n")
+    snap = snapshot_tree(ws, ws.git("rev-parse", "HEAD").strip())
+    # what the gate measured while the folded base was still the base
+    measured = ("src/pilot/solvers/pr.py", "src/pilot/solvers/tsp.py")
+    _git(other, "reset", "-q", "--hard", pin)
+    if rewrite == "sibling":
+        land("robofish/other.txt", force=True)
+    else:
+        _git(other, "push", "-q", "--force", "origin", "HEAD:main")
+    ws.fetch_origin()
+
+    outcome = _publish_to_open_pr(root, ws, path, snap, head, pin, measured)
+
+    assert outcome.outcome == "publish-refused"
+    assert _git(bare, "rev-parse", PR_BRANCH).strip() == head
+
+
+@pytest.mark.parametrize("resolution", ["base", "pr"])
+def test_publish_to_an_open_pr_checks_a_carried_path_by_content(review_run, tmp_path, resolution):
+    """The PR already changes a path outside the cone. The author folds a base
+    that changed it too, and the base is rewound after the gate. Keeping the
+    base's version was never measured, so publishing it over the PR's own is
+    refused; keeping the PR's version was measured and publishes."""
+    from outerloop.attempt import submission_paths
+    from outerloop.dispatch import snapshot_tree
+    from outerloop.github import Workspace
+
+    root, bare = review_run
+    path = run_dir(root, "tsp-r1") / "ws"
+    author = ("-c", "user.name=t", "-c", "user.email=t@t")
+    other = tmp_path / "other-team"
+    _git(tmp_path, "clone", "-q", str(bare), str(other))
+
+    def land(content: str) -> str:
+        (other / "robofish").mkdir(exist_ok=True)
+        (other / "robofish/clip.txt").write_text(content)
+        _git(other, *author, "add", "-A")
+        _git(other, *author, "commit", "-qm", content.strip())
+        _git(other, "push", "-q", "origin", "HEAD:main")
+        return _git(other, "rev-parse", "HEAD").strip()
+
+    pin = land("base X\n")
+    _git(path, "fetch", "-q", "origin")
+    _git(path, "merge", "-q", "--ff-only", pin)
+    (path / "robofish/clip.txt").write_text("PR Y\n")
+    (path / "src/pilot/solvers/pr.py").write_text("prior PR change\n")
+    _git(path, *author, "add", "-A")
+    _git(path, *author, "commit", "-qm", "PR")
+    head = _git(path, "rev-parse", "HEAD").strip()
+    _git(path, "push", "-q", "origin", f"{head}:refs/heads/{PR_BRANCH}")
+    ws = Workspace(root=path, url=str(bare))
+    ws.sparse = ("docs/.outerloop-cone", "src/pilot/solvers")
+    ws.apply_sparse()
+    folded = land("base Z\n")
+    _git(path, "fetch", "-q", "origin")
+    fold = subprocess.run(
+        ["git", "-C", str(path), *author, "merge", "-q", "--no-edit", folded],
+        capture_output=True,
+        text=True,
+    )
+    assert fold.returncode != 0  # the PR and the base both changed the path
+    side = "--theirs" if resolution == "base" else "--ours"
+    _git(path, "checkout", side, "--", "robofish/clip.txt")
+    _git(path, *author, "add", "--sparse", "robofish/clip.txt")
+    _git(path, *author, "commit", "-q", "--no-edit")
+    (path / "src/pilot/solvers/tsp.py").write_text("submitted\n")
+    snap = snapshot_tree(ws, _git(path, "rev-parse", "HEAD").strip())
+    ws.fetch_origin()
+    measured = submission_paths(ws, "refs/remotes/origin/main", snap.commit)  # as the gate did
+    _git(other, "reset", "-q", "--hard", pin)
+    _git(other, "push", "-q", "--force", "origin", "HEAD:main")
+    ws.fetch_origin()
+
+    outcome = _publish_to_open_pr(root, ws, path, snap, head, pin, measured)
+
+    pushed = _git(bare, "rev-parse", PR_BRANCH).strip()
+    if resolution == "base":
+        assert "robofish/clip.txt" not in measured
+        assert outcome.outcome == "publish-refused" and pushed == head
+        return
+    assert outcome.outcome == "improved"
+    assert _git(bare, "show", f"{pushed}:robofish/clip.txt") == "PR Y\n"
 
 
 @pytest.mark.parametrize("base", ["main", "release"])

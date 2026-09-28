@@ -118,7 +118,7 @@ from outerloop.runstate import (
     run_dir as run_dir_of,
 )
 from outerloop.session_control import controlled_author
-from outerloop.sparse import in_cone, workspace_cone
+from outerloop.sparse import in_cone, outside, workspace_cone
 from outerloop.syscall import (
     MAX_ARTIFACT_BYTES,
     MAX_REPLY_CHARS,
@@ -1538,10 +1538,11 @@ def _wake_author_sleep(
                 origin=record.run_id,
             ),
         )
-    # Re-pin the gate and scope base after a line's base advances.
+    # Re-pin the gate and scope base after a line's base advances, when the
+    # advance is one the kernel's cone can see (an unseen one measures the same).
     if _line_ref_for(bench, config.agent_id):
         fresh_base = _line_base_advanced(ws, base_branch, base_sha)
-        if fresh_base:
+        if fresh_base and _moved_in_cone(ws, base_sha, fresh_base, ws.sparse):
             digest = _reintegration_digest(ws, base_sha, fresh_base)
             base_sha = fresh_base
             append(
@@ -1623,7 +1624,9 @@ def _wake_author_sleep(
     kept_ref = ""
     try:
         # The line's base check can fetch again after resume_run captured its pin.
-        pinned_tip = _rev(ws, f"refs/remotes/origin/{base_branch}") or pinned_tip
+        # Pin as the wake did: an unchanged HEAD gives the same effective pin.
+        tip = _rev(ws, f"refs/remotes/origin/{base_branch}")
+        pinned_tip = _effective_pin(ws, tip, ws.sparse) if tip else pinned_tip
         result = run_author_leg(
             config,
             contract_text,
@@ -1974,6 +1977,16 @@ def _kernel_cone(
     return workspace_cone(contract, kind, line_dirs=(LINE_MEMORY_DIR,) if lines else ())
 
 
+def _cone_at(ws: Workspace, record: RunRecord, rev: str) -> tuple[str, ...]:
+    """The kernel's cone from the contract at `rev`, or () (a whole tree,
+    which counts every base move) when it cannot be rebuilt there."""
+    try:
+        contract = load_contract(contract_at(ws, rev), record.target)
+        return _kernel_cone(ws, contract, rev, record.benchmark, record.agent_id)
+    except Exception:
+        return ()
+
+
 def _recovery_contract(
     ws: Workspace, record: RunRecord, bases: Iterable[str]
 ) -> tuple[Contract, tuple[str, ...]]:
@@ -2103,8 +2116,47 @@ def _rev(ws: Workspace, ref: str, *, strict: bool = False) -> str:
         return ""
 
 
+def _moved_in_cone(ws: Workspace, old: str, new: str, cone: tuple[str, ...]) -> bool:
+    """Whether the tree differs between two commits anywhere `cone` can see.
+    Eval and panel trees hold only the kernel's cone (sparse.py), so a base
+    that moved only outside it measures the same. A whole tree (`()`) counts
+    any move, and a diff that cannot be read counts as moved."""
+    if old == new:
+        return False
+    if not cone:
+        return True
+    try:
+        out = ws.git("diff", "--no-renames", "--name-only", "-z", old, new)
+    except Exception as exc:
+        if isinstance(exc, GitError) and _is_git_tamper(exc):
+            raise
+        return True
+    moved = [p for p in out.split("\0") if p]
+    return len(outside(moved, cone)) < len(moved)
+
+
+def _effective_pin(ws: Workspace, tip: str, cone: tuple[str, ...]) -> str:
+    """The base a gate pins for HEAD: the newest base commit HEAD already
+    contains, when `tip` differs from it only outside `cone`, else `tip`.
+    The measured trees are then the same as after a fold, and the sealed
+    commit contains its pin, so the author need not fold a move no measured
+    tree can see."""
+    try:
+        common = ws.git("merge-base", tip, "HEAD").strip()
+    except Exception as exc:
+        if isinstance(exc, GitError) and _is_git_tamper(exc):
+            raise
+        return tip
+    if common and not _moved_in_cone(ws, common, tip, cone):
+        return common
+    return tip
+
+
 def _submit_preflight(ws: Workspace, base_branch: str, pinned_tip: str) -> SubmitPreflight:
-    """Refresh submit ancestry; ordinary Git failures do not assert staleness."""
+    """Refresh submit ancestry; ordinary Git failures do not assert staleness.
+    On a busy repository the base keeps moving while the author works. A move
+    the kernel's cone cannot see changes no measured tree, so it neither makes
+    the head stale nor the pin outdated."""
     ensure_regular_git_dir(ws.root)
     try:
         ws.fetch_origin()
@@ -2112,11 +2164,18 @@ def _submit_preflight(ws: Workspace, base_branch: str, pinned_tip: str) -> Submi
             "rev-parse", "--verify", f"refs/remotes/origin/{base_branch}^{{commit}}"
         ).strip()
         head = ws.git("rev-parse", "--verify", "HEAD^{commit}").strip()
-        if ws.git("merge-base", tip, head).strip() != tip:
+        common = ws.git("merge-base", tip, head).strip()
+        if common != tip and (
+            _moved_in_cone(ws, common, tip, ws.sparse)
+            # publish seals onto the pin, so an unfolded head must contain it
+            or not (pinned_tip and _is_ancestor(ws, pinned_tip, head))
+        ):
             return SubmitPreflight("stale", tip, base_branch)
         if not pinned_tip:
             return SubmitPreflight("unknown", tip, base_branch)
-        pin_current = pinned_tip == tip
+        pin_current = pinned_tip == tip or (
+            _is_ancestor(ws, pinned_tip, tip) and not _moved_in_cone(ws, pinned_tip, tip, ws.sparse)
+        )
         return SubmitPreflight("ready" if pin_current else "outdated-pin", tip, base_branch)
     except Exception as exc:
         if isinstance(exc, GitError) and _is_git_tamper(exc):
@@ -2655,7 +2714,11 @@ def resume_run(
     if record.pr_url and stage.get("phase") == "author-sleep":
         base_branch = str(stage.get("base_branch") or base_branch)
         # base_sha is the wake-time pin; merge and inbox checks use ancestry.
-        stage = {**stage, "base_sha": ws.git("rev-parse", f"origin/{base_branch}").strip()}
+        # A tip that moved only outside the cone pins what HEAD already holds.
+        # The contract is a root file, inside every cone, so the tip's
+        # contract also rules the older pin.
+        tip = ws.git("rev-parse", f"origin/{base_branch}").strip()
+        stage = {**stage, "base_sha": _effective_pin(ws, tip, _cone_at(ws, record, tip))}
         record = dc_replace(record, stage=stage)
 
     # Two park kinds reach the wake: a CANDIDATE park (the gate's measures were
@@ -3726,7 +3789,14 @@ def publish(
         if pr.get("state") == "closed" or pr.get("merged"):
             return refuse("Publish refused: the PR is closed.")
         fresh_base = _rev(ws, f"origin/{base_branch}")
-        if fresh_base != base_sha or not _is_ancestor(ws, base_sha, result.candidate_sha):
+        # A base that moved on past the pin only outside the cone measures the
+        # same, and the sealed commit still contains its pin.
+        if (
+            not fresh_base
+            or _moved_in_cone(ws, base_sha, fresh_base, ws.sparse)
+            or not _is_ancestor(ws, base_sha, fresh_base)
+            or not _is_ancestor(ws, base_sha, result.candidate_sha)
+        ):
             return refuse(
                 f"Publish refused: sealed commit {result.candidate_sha} must contain "
                 f"pinned base {base_sha}, and current base is {fresh_base}.",
@@ -3785,15 +3855,44 @@ def publish(
                 title = (result.submit_report or "").splitlines()
                 summary = redact(title[0].strip(), secrets) if title else ""
                 try:
-                    common = ws.git("merge-base", base_sha, head).strip()
+                    # The newest base commit the sealed candidate holds: its pin,
+                    # or a later base the author folded, never an unseen tip.
+                    folded = ws.git("merge-base", result.candidate_sha, fresh_base).strip()
+                    common = ws.git("merge-base", folded, head).strip()
+                    # Against the base it lands on, the candidate may change only
+                    # what the gate measured, or carry the PR head's own version
+                    # of a path unchanged (content, mode and presence): content
+                    # of a base rewritten after the gate must never publish as
+                    # the author's change.
+                    landing = submission_paths(
+                        ws,
+                        f"refs/remotes/origin/{base_branch}",
+                        result.candidate_sha,
+                        exclude_memory=bool(line_ref),
+                    )
+                    moved_from_head = ws.git(
+                        "diff", "--no-renames", "--name-only", "-z", head, result.candidate_sha
+                    ).split("\0")
                 except Exception as exc:
                     return refuse(
                         "Publish refused: cannot confirm PR base ancestry.",
                         quoted_text=redact(str(exc), secrets),
                     )
+                unmeasured = sorted(
+                    (set(landing) - set(result.measured_paths)) & {p for p in moved_from_head if p}
+                )
+                if unmeasured:
+                    return refuse(
+                        "Publish refused: against the current base, the sealed commit "
+                        "also changes paths the gate did not measure; the base was "
+                        "rewritten under it.",
+                        head,
+                        moved=True,
+                        quoted_text="\n".join(unmeasured[:20]),
+                    )
                 parents = ["-p", head]
-                if common != base_sha:
-                    parents += ["-p", base_sha]
+                if common != folded:
+                    parents += ["-p", folded]
                 pushed_sha = ws.git(
                     *git_identity(config.bot_login),
                     "commit-tree",

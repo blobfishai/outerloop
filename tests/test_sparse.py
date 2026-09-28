@@ -594,3 +594,95 @@ def test_new_scope_subtree_is_present_in_eval_and_panel(tmp_path, new_path):
     assert (tmp_path / "panel" / created).read_text() == "new implementation\n"
     ws.apply_sparse()
     assert destination.read_text() == "new implementation\n"
+
+
+@pytest.mark.parametrize(
+    "cone, moved, folded, expected",
+    [
+        (("pkg/a",), "data/stripe/t.json", False, "ready"),  # unseen move: no fold needed
+        (("pkg/a",), "pkg/a/deep/y.py", False, "stale"),  # a move inside the cone
+        (("pkg/a",), "top.txt", False, "stale"),  # root files are in every cone
+        (("pkg/a",), "pkg/own.txt", False, "stale"),  # files beside a cone directory
+        (("pkg/a",), "data/stripe/t.json", True, "ready"),  # folded; the pin saw it all
+        (("pkg/a",), "pkg/a/deep/y.py", True, "outdated-pin"),  # folded; the pin did not
+        ((), "data/stripe/t.json", False, "stale"),  # a whole tree counts any move
+    ],
+)
+def test_submit_preflight_ignores_base_moves_the_cone_cannot_see(
+    tmp_path, cone, moved, folded, expected
+):
+    """On a busy repository the base moves while the author works. Eval and
+    panel trees hold only the kernel's cone, so a move outside it neither
+    makes an unfolded head stale nor the gate's pin outdated. A move the
+    cone can see still needs a fold, and a whole tree counts every move."""
+    from outerloop import attempt
+
+    origin = _repo(tmp_path)
+    bare = tmp_path / "origin.git"
+    _git(origin, "clone", "--bare", str(origin), str(bare))
+    ws = Workspace.clone(str(bare), tmp_path / "ws", checkout=False)
+    ws.sparse = cone
+    ws.apply_sparse()
+    ws.git("checkout", "-q", "-B", "main", "origin/main")
+    pin = ws.git("rev-parse", "HEAD").strip()
+    (ws.root / "pkg/a/x.py").write_text("candidate\n")
+    ws.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "candidate")
+    (origin / moved).write_text("moved on the base\n")
+    _git(origin, "commit", "-qam", "another team's change")
+    _git(origin, "push", "-q", str(bare), "main")
+    tip = _git(origin, "rev-parse", "HEAD")
+    if folded:
+        ws.fetch_origin()
+        ws.git("-c", "user.name=t", "-c", "user.email=t@t", "merge", "-q", "--no-edit", tip)
+
+    result = attempt._submit_preflight(ws, "main", pin)
+
+    assert (result.status, result.tip, result.base_branch) == (expected, tip, "main")
+
+
+def test_submit_preflight_needs_the_pin_in_an_unfolded_head(tmp_path):
+    """Publish seals onto the pin, so an unfolded head must contain it, even
+    when everything the base gained since lies outside the cone."""
+    from outerloop import attempt
+
+    origin = _repo(tmp_path)
+    bare = tmp_path / "origin.git"
+    _git(origin, "clone", "--bare", str(origin), str(bare))
+    ws = Workspace.clone(str(bare), tmp_path / "ws", checkout=False)
+    ws.sparse = ("pkg/a",)
+    ws.apply_sparse()
+    ws.git("checkout", "-q", "-B", "main", "origin/main")
+    (ws.root / "pkg/a/x.py").write_text("candidate\n")
+    ws.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "candidate")
+    for name in ("data/stripe/t.json", "data/github/t.json"):
+        (origin / name).write_text("moved on the base\n")
+        _git(origin, "commit", "-qam", f"another team's change to {name}")
+    pin = _git(origin, "rev-parse", "HEAD~1")
+    _git(origin, "push", "-q", str(bare), "main")
+
+    assert attempt._submit_preflight(ws, "main", pin).status == "stale"
+
+
+def test_submit_preflight_counts_a_rewritten_base_as_moved(tmp_path):
+    """A pin the fresh tip no longer descends from is outdated even when the
+    rewrite changed nothing the cone can see: publish could not seal onto it."""
+    from outerloop import attempt
+
+    origin = _repo(tmp_path)
+    (origin / "data/stripe/t.json").write_text("the pinned base\n")
+    _git(origin, "commit", "-qam", "pinned base")
+    bare = tmp_path / "origin.git"
+    _git(origin, "clone", "--bare", str(origin), str(bare))
+    ws = Workspace.clone(str(bare), tmp_path / "ws", checkout=False)
+    ws.sparse = ("pkg/a",)
+    ws.apply_sparse()
+    ws.git("checkout", "-q", "-B", "main", "origin/main")
+    pin = ws.git("rev-parse", "HEAD").strip()
+    (ws.root / "pkg/a/x.py").write_text("candidate\n")
+    ws.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "candidate")
+    _git(origin, "reset", "-q", "--hard", "HEAD~1")
+    (origin / "data/github/t.json").write_text("a rewritten base\n")
+    _git(origin, "commit", "-qam", "rewritten base")
+    _git(origin, "push", "-q", "--force", str(bare), "main")
+
+    assert attempt._submit_preflight(ws, "main", pin).status == "outdated-pin"

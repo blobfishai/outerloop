@@ -21,6 +21,24 @@ Versions follow [SemVer](https://semver.org).
   that ref), then the remote default branch, and uses the first whose contract
   and cone rebuild. A research line's recorded base is the line tip, which can
   carry an earlier author's contract, for example one that turns lines off.
+- On a busy repository the base keeps moving while an author works, and each
+  move refused a submit or an open PR's publish until the author folded again.
+  A move outside a sparse contract's cone changes no measured tree, so it no
+  longer makes a submit stale, a gate pin outdated, or an update to an open PR
+  refused. A review wake pins the newest base commit the head already contains,
+  the gate measures there, and the sealed commit contains that pin, so the push
+  reverts nothing. The published head's base parent is the newest base commit
+  the sealed candidate contains, so a base the author folded anyway keeps its
+  ancestry and a later tip the author never saw is never spliced in. A rewritten
+  base is refused as before. An update to an open PR is also refused when,
+  against the current base, the sealed commit would change paths that the gate
+  did not measure, unless it carries the PR head's own version of them unchanged
+  (content, mode and presence). The base was then rewritten after the gate, and
+  its content must not publish as the author's. A research line re-pins its base
+  only for an advance the cone can see. Moves the cone can see (root files including the contract,
+  and declared or scope directories) still need a fold. Whole-tree contracts count
+  every move, and auto-merge still requires the head to contain the base tip.
+  The PR-level base-moved notice cannot see the cone yet.
 
 - Subscription research keeps Codex's native tool host enabled for live web
   search while disabling shell, unified execution, image and extension tools.
