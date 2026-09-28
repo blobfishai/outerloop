@@ -8,6 +8,9 @@ Versions follow [SemVer](https://semver.org).
 
 ### Fixed
 
+- Manual harness upgrades honor `--root`, environment, and `.env` state roots. Retry records are replaced atomically; unreadable or invalid records are logged and ignored. Deploy loads the configured cache root before selecting the uv cache.
+- Harness installers reinstall changed binaries rather than refusing repair; Codex checks its installed binary digest separately from the archive pin, and Hermes runtime reuse checks the interpreter digest.
+
 - Harness upgrades enforce a per-harness deadline, kill timed-out installer process groups, restrict installer environments, and back off failed pins while deleting failed candidates. Overrides require explicit integrity hashes; installed binaries are hash-checked before reuse. Workflow pin resolution fails explicitly on older reviewer refs without a pins reader.
 
 - Tick entrypoints export a state-root uv cache before running Python. Fleet job environments preserve explicit cache paths and default per-user caches below `OUTERLOOP_CACHE_ROOT` (or the state root).
@@ -29,6 +32,8 @@ Versions follow [SemVer](https://semver.org).
 - Read-only `outerloop limits` reports operator ceilings and fleet-owned running/pending GPU usage.
 
 ### Changed
+
+- Upgrading: legacy Codex archive-only markers and Hermes runtimes without interpreter digests are reinstalled on upgrade; legacy Hermes runtimes remain launchable. Existing retry records remain readable, and corrupt records are treated as empty. Run state and in-flight PRs are unchanged; rollback leaves the additional digest files unused.
 
 - Upgrading: version overrides now require matching SHA-256 settings; legacy Codex installs without hash markers are reprovisioned. New retry state and hash markers are ignored by older kernels; the first successfully synced tick verifies configured harnesses and records new paths only when needed. Legacy `.env` paths and Hermes runtimes remain readable; old artifacts are retained. See `docs/install.md` for rollback across kernel pins.
 

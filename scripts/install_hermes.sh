@@ -80,12 +80,16 @@ if [ "$head" != "$WANT_SHA" ]; then
 fi
 RUNTIME="${TARGET}.runtime/$WANT_SHA"
 if [ -f "$RUNTIME/.complete" ] && [ "$(cat "$RUNTIME/.complete")" = "$WANT_SHA" ] && \
-   [ -x "$RUNTIME/venv/bin/python" ]; then
+   [ -x "$RUNTIME/venv/bin/python" ] && \
+   [ "$(cat "$RUNTIME/venv/bin/python.verified-sha256" 2>/dev/null || true)" = \
+     "$(sha256sum "$RUNTIME/venv/bin/python" | cut -d' ' -f1)" ]; then
     echo "hermes-agent $WANT ($WANT_SHA) ready at $TARGET"
     exit 0
 fi
 mkdir -p "$RUNTIME"
 rm -f "$RUNTIME/.complete"
+# Rebuild both the interpreter and venv after an interrupted or changed install.
+rm -rf "$RUNTIME/python" "$RUNTIME/venv"
 export UV_PYTHON_INSTALL_DIR="$RUNTIME/python"
 export UV_PROJECT_ENVIRONMENT="$RUNTIME/venv"
 export UV_CACHE_DIR="$RUNTIME/cache"
@@ -100,5 +104,6 @@ esac
 uv sync --project "$TARGET" --frozen --no-install-project --python "$python"
 "$RUNTIME/venv/bin/python" -B -c 'import sys; assert sys.version_info >= (3, 12)'
 rm -rf "$UV_CACHE_DIR"  # the venv is complete; sessions never need the download cache
+sha256sum "$RUNTIME/venv/bin/python" | cut -d' ' -f1 > "$RUNTIME/venv/bin/python.verified-sha256"
 printf '%s\n' "$WANT_SHA" > "$RUNTIME/.complete"
 echo "hermes-agent $WANT ($WANT_SHA) ready at $TARGET"

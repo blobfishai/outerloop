@@ -127,12 +127,55 @@ if [ "$POLICY" != off ]; then
     fi
     [ -n "$ASKPASS" ] && rm -f "$ASKPASS"
 fi
+# --- config knobs: the config-driven AUTHOR knobs from the operator .env, so
+# live config changes need no chain restart. These are where
+# OUTERLOOP_AUTHOR_BACKEND/_MODEL and the per-backend key files live; the
+# config-driven climb/followup default from them and the tick preflights them.
+# Only this ALLOWLIST is read, so .env is structurally per-tick author config
+# and can never hijack the chain's identity or scheduling.
+if [ -n "$ENV_TRUSTED" ]; then
+    for _k in OUTERLOOP_CLAUDE_VERSION OUTERLOOP_CODEX_VERSION \
+                  OUTERLOOP_CLAUDE_SHA256 OUTERLOOP_CODEX_SHA256 \
+                  OUTERLOOP_HERMES_REF OUTERLOOP_HERMES_SHA \
+                  OUTERLOOP_CACHE_ROOT REVIEW_BACKEND \
+                  OUTERLOOP_AUTHOR_BACKEND OUTERLOOP_AUTHOR_MODEL OUTERLOOP_CLAUDE_MODEL \
+                  OUTERLOOP_CLAUDE_BIN OUTERLOOP_CODEX_BIN OUTERLOOP_CODEX_KEY_FILE \
+                  OUTERLOOP_CLAUDE_KEY_FILE OUTERLOOP_STEWARD_KEY_FILE \
+                  OUTERLOOP_VERTEX_PROJECT OUTERLOOP_VERTEX_REGION \
+                  OUTERLOOP_VERTEX_ADC OUTERLOOP_VERTEX_SMALL_MODEL \
+                  OUTERLOOP_TARGET \
+                  OUTERLOOP_GITHUB_APP_FILE OUTERLOOP_BOT_LOGIN OUTERLOOP_BOT_ALIASES \
+                  OUTERLOOP_GPU_PARTITION OUTERLOOP_GPU_ACCOUNT \
+                  OUTERLOOP_QOS OUTERLOOP_APPTAINER_BIN \
+                  OUTERLOOP_IMAGE \
+                  OUTERLOOP_PANEL OUTERLOOP_PANEL_KEY_FILE \
+                  OUTERLOOP_PANEL_CODEX_KEY_FILE \
+                  OUTERLOOP_PANEL_HERMES_KEY_FILE \
+                  REVIEW_HERMES_REPO REVIEW_HERMES_PROVIDER; do
+        env_line
+        # PRESENCE-based, not value-based: a key set to "" in .env is a
+        # live OFF-SWITCH (OUTERLOOP_PANEL="" disables the panel,
+        # VERTEX_PROJECT="" reverts to API-key billing) and must override
+        # an inherited chain value; an ABSENT key changes nothing.
+        if [ -n "$_line" ]; then
+            env_value
+            export "$_k=$_v"
+        fi
+    done
+fi
+
 # Host-side caches must never land in $HOME: home quotas are tiny on many
 # clusters and invisible until EDQUOT (verified on Torch — a full home took
 # down a live run). Default them under the state root (scratch-class
 # storage); explicit env wins. Submitted jobs inherit these via sbatch.
-export UV_CACHE_DIR="${UV_CACHE_DIR:-$OUTERLOOP_ROOT/cache/uv}"
-export APPTAINER_CACHEDIR="${APPTAINER_CACHEDIR:-$OUTERLOOP_ROOT/cache/apptainer}"
+export OUTERLOOP_CACHE_ROOT="${OUTERLOOP_CACHE_ROOT:-$OUTERLOOP_ROOT/cache}"
+if [ -n "${_OUTERLOOP_DEFAULT_UV_CACHE_DIR:-}" ] && \
+   [ "${UV_CACHE_DIR:-}" = "$_OUTERLOOP_DEFAULT_UV_CACHE_DIR" ]; then
+    UV_CACHE_DIR="$OUTERLOOP_CACHE_ROOT/uv"
+    _OUTERLOOP_DEFAULT_UV_CACHE_DIR="$UV_CACHE_DIR"
+fi
+export UV_CACHE_DIR="${UV_CACHE_DIR:-$OUTERLOOP_CACHE_ROOT/uv}"
+export APPTAINER_CACHEDIR="${APPTAINER_CACHEDIR:-$OUTERLOOP_CACHE_ROOT/apptainer}"
 mkdir -p "$UV_CACHE_DIR" "$APPTAINER_CACHEDIR" || true
 
 # Code and environment move together or not at all. The tick runs with
@@ -181,43 +224,6 @@ else
     fi
 fi
 export OUTERLOOP_DEPLOY_BROKEN
-
-# --- config knobs: the config-driven AUTHOR knobs from the operator .env, so
-# live config changes need no chain restart. These are where
-# OUTERLOOP_AUTHOR_BACKEND/_MODEL and the per-backend key files live; the
-# config-driven climb/followup default from them and the tick preflights them.
-# Only this ALLOWLIST is read, so .env is structurally per-tick author config
-# and can never hijack the chain's identity or scheduling.
-if [ -n "$ENV_TRUSTED" ]; then
-    for _k in OUTERLOOP_CLAUDE_VERSION OUTERLOOP_CODEX_VERSION \
-                  OUTERLOOP_CLAUDE_SHA256 OUTERLOOP_CODEX_SHA256 \
-                  OUTERLOOP_HERMES_REF OUTERLOOP_HERMES_SHA \
-                  OUTERLOOP_CACHE_ROOT REVIEW_BACKEND \
-                  OUTERLOOP_AUTHOR_BACKEND OUTERLOOP_AUTHOR_MODEL OUTERLOOP_CLAUDE_MODEL \
-                  OUTERLOOP_CLAUDE_BIN OUTERLOOP_CODEX_BIN OUTERLOOP_CODEX_KEY_FILE \
-                  OUTERLOOP_CLAUDE_KEY_FILE OUTERLOOP_STEWARD_KEY_FILE \
-                  OUTERLOOP_VERTEX_PROJECT OUTERLOOP_VERTEX_REGION \
-                  OUTERLOOP_VERTEX_ADC OUTERLOOP_VERTEX_SMALL_MODEL \
-                  OUTERLOOP_TARGET \
-                  OUTERLOOP_GITHUB_APP_FILE OUTERLOOP_BOT_LOGIN OUTERLOOP_BOT_ALIASES \
-                  OUTERLOOP_GPU_PARTITION OUTERLOOP_GPU_ACCOUNT \
-                  OUTERLOOP_QOS OUTERLOOP_APPTAINER_BIN \
-                  OUTERLOOP_IMAGE \
-                  OUTERLOOP_PANEL OUTERLOOP_PANEL_KEY_FILE \
-                  OUTERLOOP_PANEL_CODEX_KEY_FILE \
-                  OUTERLOOP_PANEL_HERMES_KEY_FILE \
-                  REVIEW_HERMES_REPO REVIEW_HERMES_PROVIDER; do
-        env_line
-        # PRESENCE-based, not value-based: a key set to "" in .env is a
-        # live OFF-SWITCH (OUTERLOOP_PANEL="" disables the panel,
-        # VERTEX_PROJECT="" reverts to API-key billing) and must override
-        # an inherited chain value; an ABSENT key changes nothing.
-        if [ -n "$_line" ]; then
-            env_value
-            export "$_k=$_v"
-        fi
-    done
-fi
 
 # A failed harness upgrade retains its previous path and never blocks a tick.
 export OUTERLOOP_CACHE_ROOT="${OUTERLOOP_CACHE_ROOT:-$OUTERLOOP_ROOT/cache}"

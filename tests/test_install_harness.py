@@ -245,6 +245,12 @@ esac
     prior = calls.read_text()
     assert subprocess.run(["bash", str(script), str(repo)], env=env).returncode == 0
     assert calls.read_text() == prior
+    # A matching completion SHA cannot bless a modified interpreter.
+    python = runtime / "venv/bin/python"
+    python.write_text("#!/bin/sh\nexit 19\n")
+    assert subprocess.run(["bash", str(script), str(repo)], env=env).returncode == 0
+    assert calls.read_text() != prior
+    assert python.read_text() == "#!/bin/sh\nexit 0\n"
 
 
 @pytest.mark.parametrize("source_exists", [False, True])
@@ -424,3 +430,59 @@ def test_hermes_workflow_pin_drift_refused(tmp_path):
     assert result.returncode == 1
     assert "pins disagree" in result.stderr
     assert not repo.exists()
+
+
+@pytest.mark.parametrize("name", ["claude", "codex"])
+@pytest.mark.parametrize("marker", ["legacy", "stale"])
+def test_tampered_binary_reinstalled(tmp_path, name, marker):
+    import tarfile
+
+    from outerloop import harness_cli
+    from outerloop.harness_pins import pins
+
+    version = pins(name)["version"]
+    payload = f"#!/bin/sh\necho '{version}'\n"
+    binary = tmp_path / name
+    binary.write_text(payload)
+    asset = tmp_path / "asset"
+    if name == "codex":
+        with tarfile.open(asset, "w:gz") as archive:
+            archive.add(binary, arcname="codex")
+    else:
+        asset.write_text(payload)
+    checksum = hashlib.sha256(asset.read_bytes()).hexdigest()
+    digest = hashlib.sha256(payload.encode()).hexdigest()
+    source = (ROOT / f"scripts/install_{name}.sh").read_text()
+    source = re.sub(
+        rf'WANT_SHA256="\$\(pin {name} [a-z0-9-]+\)"',
+        f'WANT_SHA256="{checksum}"',
+        source,
+    )
+    script = tmp_path / "installer.sh"
+    script.write_text(source)
+    binary.write_text(payload + "# tampered\n")
+    binary.chmod(0o755)
+    sidecar = Path(f"{binary}.verified-sha256")
+    sidecar.write_text(checksum if marker == "legacy" else f"{checksum} {digest}")
+    desired = {"version": version, "sha256": checksum}
+    assert not harness_cli.verified(name, binary, desired)
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    for command, body in {
+        "curl": '#!/bin/sh\nwhile [ "$1" != -o ]; do shift; done\ncp "$ASSET" "$2"\n',
+        "uname": '#!/bin/sh\ncase "$1" in -s) echo Linux;; -m) echo x86_64;; esac\n',
+    }.items():
+        executable = shim / command
+        executable.write_text(body)
+        executable.chmod(0o755)
+    env = {**os.environ, "PATH": f"{shim}:{os.environ['PATH']}", "ASSET": str(asset)}
+    argv = ["bash", str(script), str(binary)]
+    result = subprocess.run(argv, env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert binary.read_text() == payload
+    assert harness_cli.verified(name, binary, desired)
+    if name == "codex":
+        assert sidecar.read_text().strip() == f"{checksum} {digest}"
+        assert checksum != digest
+    (shim / "curl").write_text("#!/bin/sh\nexit 99\n")
+    assert subprocess.run(argv, env=env).returncode == 0

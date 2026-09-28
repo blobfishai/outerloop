@@ -551,7 +551,8 @@ exit 0
         else "true"
     )
     (bindir / "uv").write_text(
-        f'#!/bin/sh\ncase "$1" in sync) echo x >> "{syncs}"; {fail} ;; esac\nexit 0\n'
+        f'#!/bin/sh\necho "$UV_CACHE_DIR" >> "{tmp_path}/uv-caches"\n'
+        f'case "$1" in sync) echo x >> "{syncs}"; {fail} ;; esac\nexit 0\n'
     )
     for p in bindir.iterdir():
         os.chmod(p, 0o755)
@@ -846,3 +847,26 @@ exit 0
     if mode == "upgrade_failure":
         log = next(root.joinpath("logs").glob("tick-*.log")).read_text()
         assert "harness upgrade failed; previous versions retained" in log
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.parametrize("inherited_default", [False, True])
+def test_deploy_configured_cache_precedes_sync(tmp_path, explicit, inherited_default):
+    configured = tmp_path / "configured-cache"
+    chosen = tmp_path / "explicit-uv" if explicit else configured / "uv"
+    proc, _ = _deploy(
+        tmp_path,
+        env_file=f"OUTERLOOP_CACHE_ROOT={configured}\n",
+        UV_CACHE_DIR=(
+            str(chosen)
+            if explicit
+            else str(tmp_path / "root/cache/uv")
+            if inherited_default
+            else ""
+        ),
+        _OUTERLOOP_DEFAULT_UV_CACHE_DIR=(
+            str(tmp_path / "root/cache/uv") if inherited_default else ""
+        ),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert set((tmp_path / "uv-caches").read_text().splitlines()) == {str(chosen)}

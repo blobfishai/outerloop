@@ -31,11 +31,11 @@ have="$("$TARGET" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+([-+][
 if [ "$have" = "$WANT" ]; then
     actual=$(sha256sum "$TARGET" | cut -d' ' -f1)
     expected="$WANT_SHA256 $actual"
-    [ "$(cat "$TARGET.verified-sha256" 2>/dev/null || true)" = "$expected" ] || {
-        echo "install_codex: installed sha256 marker missing/mismatch — refusing" >&2; exit 1;
-    }
-    echo "install_codex: codex $WANT already at $TARGET"
-    exit 0
+    if [ "$(cat "$TARGET.verified-sha256" 2>/dev/null || true)" = "$expected" ]; then
+        echo "install_codex: codex $WANT already at $TARGET"
+        exit 0
+    fi
+    echo "install_codex: installed sha256 marker missing/mismatch — reinstalling" >&2
 fi
 
 # npm verifies registry integrity and supports operator trial releases.

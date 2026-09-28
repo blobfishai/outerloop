@@ -89,15 +89,18 @@ CONFIG_KEYS = (
     "REVIEW_BACKEND",
     "OUTERLOOP_PANEL",
     "OUTERLOOP_CACHE_ROOT",
+    "OUTERLOOP_ROOT",
 )
 
 
 def verified(name: str, path: Path, desired: Mapping[str, str]) -> bool:
     if name == "hermes":
-        return True  # probe checks the clean commit and runtime marker
+        path = Path(f"{path.resolve()}.runtime") / desired["sha"] / "venv/bin/python"
     try:
         with path.open("rb") as file:
             actual = hashlib.file_digest(file, "sha256").hexdigest()
+        if name == "hermes":
+            return Path(f"{path}.verified-sha256").read_text().strip() == actual
         if name == "claude":
             return actual in [v for k, v in desired.items() if k != "version"]
         return (
@@ -105,7 +108,7 @@ def verified(name: str, path: Path, desired: Mapping[str, str]) -> bool:
         )
     except TimeoutError:
         raise
-    except OSError:
+    except (OSError, UnicodeError):
         return False
 
 
@@ -184,13 +187,17 @@ def record_path(env_file: Path, key: str, target: Path) -> None:
     old = env_file.read_text() if env_file.exists() else ""
     lines = [line for line in old.splitlines() if line.partition("=")[0].strip() != key]
     lines.append(f'{key}="{value}"')
-    fd, temporary = tempfile.mkstemp(prefix=".env-", dir=env_file.parent)
+    write_atomic(env_file, "\n".join(lines) + "\n")
+
+
+def write_atomic(path: Path, content: str) -> None:
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}-", dir=path.parent)
     try:
         with os.fdopen(fd, "w") as file:
-            file.write("\n".join(lines) + "\n")
+            file.write(content)
             file.flush()
             os.fsync(file.fileno())
-        os.replace(temporary, env_file)
+        os.replace(temporary, path)
     finally:
         Path(temporary).unlink(missing_ok=True)
 
@@ -207,9 +214,23 @@ def upgrade_one(name: str, env: dict[str, str], env_file: Path, root: Path) -> N
         / f"{name}-{key}.json"
     )
     attempts = 0
-    if state.exists():
+    try:
         saved = json.loads(state.read_text())
-        attempts = int(saved["attempts"])
+        if (
+            not isinstance(saved, dict)
+            or type(saved.get("attempts")) is not int
+            or saved["attempts"] < 0
+            or type(saved.get("retry_after")) not in (int, float)
+            or not math.isfinite(saved["retry_after"])
+        ):
+            raise ValueError("invalid retry state")
+    except FileNotFoundError:
+        saved = None
+    except (OSError, ValueError, UnicodeError, OverflowError) as exc:
+        print(f"{name}: ignoring unreadable/invalid retry state {state}: {exc}", file=sys.stderr)
+        saved = None
+    if saved is not None:
+        attempts = saved["attempts"]
         if time.time() < saved["retry_after"]:
             raise ValueError(f"retry backoff active until {saved['retry_after']}")
     candidate = None
@@ -249,13 +270,14 @@ def upgrade_one(name: str, env: dict[str, str], env_file: Path, root: Path) -> N
     except (OSError, ValueError, subprocess.SubprocessError):
         signal.setitimer(signal.ITIMER_REAL, 0)
         state.parent.mkdir(parents=True, exist_ok=True)
-        state.write_text(
+        write_atomic(
+            state,
             json.dumps(
                 {
                     "attempts": attempts + 1,
                     "retry_after": time.time() + min(300 * 2 ** min(attempts, 9), 86400),
                 }
-            )
+            ),
         )
         raise
     finally:
@@ -271,6 +293,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("status", help="report pins, overrides, installed paths and drift")
     up = sub.add_parser("upgrade", help="verify new installations before switching paths")
     up.add_argument("names", nargs="*", metavar="NAME")
+    up.add_argument("--root", help="state root (flag, environment, then .env)")
     up.add_argument("--used", action="store_true", help="only configured deployment backends")
     args = parser.parse_args(argv)
     if args.command == "upgrade" and any(name not in NAMES for name in args.names):
@@ -286,7 +309,9 @@ def main(argv: list[str] | None = None) -> int:
             env = {**env_file_values(env_file, keys=CONFIG_KEYS), **os.environ}
             names = args.names or (used_harnesses(env) if args.used else list(NAMES))
             root = (
-                Path(env.get("OUTERLOOP_ROOT") or Path.home() / ".outerloop").expanduser().resolve()
+                Path(args.root or env.get("OUTERLOOP_ROOT") or Path.home() / ".outerloop")
+                .expanduser()
+                .resolve()
             )
             failed = False
             for name in dict.fromkeys(names):

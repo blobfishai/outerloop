@@ -49,9 +49,11 @@ case "$platform" in
 esac
 if [ "$have" = "$WANT" ]; then
     actual=$(sha256sum "$TARGET" | cut -d' ' -f1)
-    [ "$actual" = "$WANT_SHA256" ] || { echo "install_claude: installed sha256 mismatch — refusing" >&2; exit 1; }
-    echo "install_claude: claude $WANT already at $TARGET"
-    exit 0
+    if [ "$actual" = "$WANT_SHA256" ]; then
+        echo "install_claude: claude $WANT already at $TARGET"
+        exit 0
+    fi
+    echo "install_claude: installed sha256 mismatch — reinstalling" >&2
 fi
 
 for tool in curl sha256sum; do

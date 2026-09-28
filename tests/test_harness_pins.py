@@ -196,6 +196,10 @@ def test_hermes_legacy_runtime_follows_installed_sha(tmp_path, monkeypatch, caps
     runtime = hermes_runtime(repo)
     binary(runtime / "venv/bin/python", "3.12")
     (runtime / ".complete").write_text(sha)
+    # Legacy runtime markers are still launchable, but upgrades require a digest.
+    assert not harness_cli.verified("hermes", repo, effective("hermes", env))
+    python = runtime / "venv/bin/python"
+    Path(f"{python}.verified-sha256").write_text(hashlib.sha256(python.read_bytes()).hexdigest())
     for _ in range(2):
         assert hermes_ready(repo)
         assert harness_cli.probe("hermes", repo) == (sha, True)
@@ -405,6 +409,10 @@ def test_hash_mismatch_fast_path(tmp_path, name):
     uname = shim / "uname"
     uname.write_text('#!/bin/sh\ncase "$1" in -s) echo Linux;; -m) echo x86_64;; esac\n')
     uname.chmod(0o755)
+    for command in ("curl", "npm"):
+        executable = shim / command
+        executable.write_text("#!/bin/sh\nexit 19\n")
+        executable.chmod(0o755)
     env["PATH"] = f"{shim}:{env['PATH']}"
     result = subprocess.run(
         ["bash", str(ROOT / f"scripts/install_{name}.sh"), str(target)],
@@ -478,3 +486,77 @@ def test_workflow_missing_field_fails_loudly(tmp_path, output):
     assert result.returncode != 0
     assert "::error::Cannot read Codex pin" in result.stdout
     assert not (tmp_path / "env").exists()
+
+
+@pytest.mark.parametrize("source", ["file", "env", "flag"])
+@pytest.mark.parametrize("failure", [False, True])
+def test_manual_upgrade_root_precedence(tmp_path, monkeypatch, source, failure):
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"OUTERLOOP_ROOT={tmp_path / 'file'}\n")
+    monkeypatch.setattr(paths, "ENV_FILE", env_file)
+    monkeypatch.setattr(os, "environ", {})
+    if source in {"env", "flag"}:
+        monkeypatch.setenv("OUTERLOOP_ROOT", str(tmp_path / "env"))
+    monkeypatch.setattr(harness_cli, "verified", lambda *a: True)
+
+    def fail(script, target, env):
+        assert target.is_relative_to(tmp_path / source / "harnesses")
+        if failure:
+            raise OSError("test failure")
+        binary(target, pins("claude")["version"])
+
+    monkeypatch.setattr(harness_cli, "run_installer", fail)
+    argv = ["upgrade", "claude"]
+    if source == "flag":
+        argv += ["--root", str(tmp_path / "flag")]
+    assert harness_cli.main(argv) == int(failure)
+    assert len(list((tmp_path / source / "cache/harness-failures").glob("*.json"))) == int(failure)
+    if not failure:
+        recorded = env_file_values(env_file, keys=None)
+        assert Path(recorded["OUTERLOOP_CLAUDE_BIN"]).is_relative_to(
+            tmp_path / source / "harnesses"
+        )
+
+
+@pytest.mark.parametrize("content", ['{"attempts":', "{}", "[]", '{"attempts": -1}', "\xff"])
+def test_invalid_retry_state_does_not_block_upgrade(tmp_path, monkeypatch, capsys, content):
+    import json
+
+    desired = effective("claude", {})
+    key = hashlib.sha256(json.dumps(desired, sort_keys=True).encode()).hexdigest()
+    state = tmp_path / "cache/harness-failures" / f"claude-{key}.json"
+    state.parent.mkdir(parents=True)
+    state.write_bytes(content.encode("latin1"))
+    env: dict[str, str] = {}
+    monkeypatch.setattr(harness_cli, "verified", lambda *a: True)
+    monkeypatch.setattr(
+        harness_cli, "run_installer", lambda script, target, env: binary(target, desired["version"])
+    )
+    harness_cli.upgrade_one("claude", env, tmp_path / ".env", tmp_path)
+    assert capsys.readouterr().err.count("ignoring unreadable/invalid retry state") == 1
+    assert not state.exists()
+    assert Path(env["OUTERLOOP_CLAUDE_BIN"]).is_relative_to(tmp_path / "harnesses")
+
+
+def test_retry_state_atomic_replace(tmp_path, monkeypatch):
+    import json
+
+    monkeypatch.setattr(harness_cli, "probe", lambda *a: ("missing", False))
+    monkeypatch.setattr(
+        harness_cli, "run_installer", lambda *a: (_ for _ in ()).throw(OSError("install failed"))
+    )
+    replace = os.replace
+    published = []
+
+    def inspect(source, target):
+        assert source != target
+        assert Path(source).parent == target.parent
+        assert json.loads(Path(source).read_text())["attempts"] == 1
+        published.append(target)
+        replace(source, target)
+
+    monkeypatch.setattr(harness_cli.os, "replace", inspect)
+    with pytest.raises(OSError, match="install failed"):
+        harness_cli.upgrade_one("claude", {}, tmp_path / ".env", tmp_path)
+    assert len(published) == 1
+    assert list(published[0].parent.iterdir()) == published
