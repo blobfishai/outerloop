@@ -12,17 +12,26 @@ Versions follow [SemVer](https://semver.org).
 - Intake admission counts queued attempts using the existing pending markers, including jobs queued beyond the marker TTL.
 
 - GPU accounting accepts Slurm 25.05 wrapped numeric fields and legacy integers, recognizes typed GPU requests and per-node counts, and limits pending array remainders to available throttle slots.
+- CI Hermes provisioning uses the shared runtime installer with anonymous clone retries and matching workflow pins. A source-specific lock protects checkout and runtime mutations; Python discovery excludes active virtualenvs.
+- Panel preflight checks Hermes runtime readiness and explains installation; full init preserves review model and provider settings with environment precedence.
+
+- Contained Hermes sessions can start with read-only source; sessions no longer reinstall dependencies or attempt an editable project build.
 
 ### Added
 
 - Live, tighten-only `<root>/limits.toml` GPU and active-attempt ceilings, with global defaults and per-target sections. Scheduler-reported GPU usage covers pending and running experiments, sweeps, evaluations, and GPU-bearing sessions. Authors receive uncharged launch refusals; evaluations wait for capacity. Lowering a ceiling does not cancel jobs.
 - Read-only `outerloop limits` reports operator ceilings and fleet-owned running/pending GPU usage.
 
+### Changed
+
+- Hermes installs a standalone Python and venv once per pinned commit in a sibling runtime, then launches Python directly. Full `init` provisions configured Hermes judges and records their source path; `--no-install-harness` opts out.
+
 ### Upgrading
 
 - Upgrading: full run-ID names and legacy 60-character queue names remain readable; shortened names use a derived run key without changing run records. Intake adds `@intake-<issue>` files in the existing pending directory; legacy unsuffixed and agent-slot markers remain readable. Drain queued intake jobs from older submitters (which wrote no marker) before relying on attempt ceilings. Upgrade all kernels together; older kernels do not recognize shortened names or intake markers, so drain those jobs before rollback.
 
 - Upgrading: the optional `stage.capacity_wait` flag tolerates missing fields; existing state records need only their target for scheduler attribution. No contract schema change or admission journal. Drain older jobs whose names omit the full run ID (and older local jobs without scheduler metadata), and upgrade all submitters before relying on ceilings. Concurrent admissions may overshoot by one batch for two simultaneous checks; no cross-node admission lock.
+- Upgrading: existing Hermes source-only installs require `bash scripts/install_hermes.sh "$REVIEW_HERMES_REPO"` (or full `outerloop init --force` with Hermes configured) to create the persisted runtime. Run records and resume transcripts are unchanged; rollback leaves the sibling runtime unused.
 
 ## [0.2.1] - 2026-09-25
 

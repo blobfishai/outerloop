@@ -313,7 +313,7 @@ directory. Hermes remains a review backend, provisioned with
 - Codex, as author or reviewer: the pinned Codex CLI; install with
   `bash scripts/install_codex.sh`.
 - Hermes, as reviewer only (not an author backend): the pinned hermes-agent
-  source checkout, run through `uv`; install with `bash scripts/install_hermes.sh`.
+  source checkout and runtime; install with `bash scripts/install_hermes.sh`.
 
 `init` records the absolute Claude
 or Codex path found on PATH (or in `~/.local/bin`) as `OUTERLOOP_<BACKEND>_BIN`.
@@ -322,7 +322,31 @@ precedence, otherwise it searches PATH, then `~/.local/bin`. A missing or non-ex
 launch before any job runs. After installing or moving it, run
 `outerloop init --force` to record its path again. `--dry-run` prints the launch
 command without checking the CLI. For Hermes, set `REVIEW_HERMES_REPO` to the installed checkout (the installer
-defaults to `~/hermes-agent`); contained review sessions bind its source read-only.
+defaults to `~/hermes-agent`). Full `init` installs a missing Hermes runtime when
+`OUTERLOOP_PANEL` includes a Hermes lens or `REVIEW_BACKEND=hermes`, reading the
+shell or existing `.env`, and records `REVIEW_HERMES_REPO`. `--no-install-harness`
+skips this installation too.
+
+The Hermes installer needs `git` and `uv`. After verifying the pinned source it
+installs a uv-managed Python under `<repo>.runtime/<commit-sha>/python` and runs
+`uv sync --frozen --no-install-project` into the sibling runtime's `venv`.
+A completion marker written last makes repeated installs fast. The runtime stays
+outside the checkout so source cleanup cannot remove it. Sessions run
+`<runtime>/venv/bin/python -B <repo>/run_agent.py` directly, with no dependency
+installation or uv cache in the per-run home. Contained sessions bind both source
+and the whole runtime read-only at their original absolute paths, alongside the
+workspace and private per-run home. Install on the same OS and architecture as
+the session image; a runtime built on macOS cannot execute in a Linux image.
+A missing or incomplete runtime is an error naming the installer.
+
+**Upgrading existing Hermes installs:** rerun
+`bash scripts/install_hermes.sh "$REVIEW_HERMES_REPO"` (or full
+`outerloop init --force` with Hermes configured). Source-only installs remain
+valid installer input; the first run builds the runtime, retries complete an
+interrupted build, and later runs reuse it. If a forcibly killed installer leaves
+`<runtime>/.installing`, confirm no installer is running, remove that empty lock
+directory, and retry. Existing run records and resume transcripts are unchanged. Rolling back leaves an unused sibling runtime;
+older kernels retain their previous session-launch behavior.
 
 The quickest path is the guided setup:
 
