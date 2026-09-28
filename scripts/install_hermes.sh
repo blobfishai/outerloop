@@ -1,9 +1,9 @@
 #!/bin/bash
-# Idempotent install of the pinned hermes-agent clone (the hermes panel lens's
-# host prerequisite, like codex's binary). The clone itself is read-only at
-# session time — the harness binds it :ro and builds the venv in the per-run
-# home — so this only materializes source at a pinned tag. Safe to run
-# repeatedly: the fast path checks the tag already checked out.
+# Install verified source at <repo>, and its runtime at <repo>.runtime/<sha>/.
+# The sibling runtime contains python/ (uv-managed Python) and venv/; neither
+# can dirty the checkout or be removed by its git clean. Both source and the
+# whole runtime are bound read-only at their host paths during contained runs.
+# .complete is written last; reruns reuse a completed runtime for this pin.
 #
 # Usage: install_hermes.sh [target_dir]
 #   target_dir  where the clone lives (default: $REVIEW_HERMES_REPO,
@@ -40,4 +40,34 @@ if [ "$head" != "$WANT_SHA" ]; then
     echo "hermes-agent: tag $WANT resolves to $head, expected $WANT_SHA — refusing" >&2
     exit 1
 fi
+TARGET=$(cd "$TARGET" && pwd -P)
+RUNTIME="${TARGET}.runtime/$WANT_SHA"
+if [ -f "$RUNTIME/.complete" ] && [ "$(cat "$RUNTIME/.complete")" = "$WANT_SHA" ] && \
+   [ -x "$RUNTIME/venv/bin/python" ]; then
+    echo "hermes-agent $WANT ($WANT_SHA) ready at $TARGET"
+    exit 0
+fi
+mkdir -p "$RUNTIME"
+# Refuse concurrent provisioning; an interrupted build has no completion marker.
+if ! mkdir "$RUNTIME/.installing" 2>/dev/null; then
+    echo "hermes-agent: installation in progress; if interrupted, remove $RUNTIME/.installing and retry" >&2
+    exit 1
+fi
+trap 'rmdir "$RUNTIME/.installing"' EXIT
+rm -f "$RUNTIME/.complete"
+export UV_PYTHON_INSTALL_DIR="$RUNTIME/python"
+export UV_PROJECT_ENVIRONMENT="$RUNTIME/venv"
+export UV_CACHE_DIR="$RUNTIME/cache"
+export UV_PYTHON_PREFERENCE=only-managed
+export UV_LINK_MODE=copy
+uv python install --no-bin 3.12
+python=$(uv python find 3.12)  # UV_PYTHON_PREFERENCE=only-managed restricts the search
+case "$python" in
+    "$RUNTIME/python/"*) ;;
+    *) echo "hermes-agent: Python must live under $RUNTIME/python" >&2; exit 1 ;;
+esac
+uv sync --project "$TARGET" --frozen --no-install-project --python "$python"
+"$RUNTIME/venv/bin/python" -B -c 'import sys; assert sys.version_info >= (3, 12)'
+rm -rf "$UV_CACHE_DIR"  # the venv is complete; sessions never need the download cache
+printf '%s\n' "$WANT_SHA" > "$RUNTIME/.complete"
 echo "hermes-agent $WANT ($WANT_SHA) ready at $TARGET"

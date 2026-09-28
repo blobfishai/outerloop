@@ -33,6 +33,7 @@ from typing import Any
 
 from outerloop.cli import ENV_FILE, StartError, env_file_values
 from outerloop.harness import HARNESS_INSTALL, default_binary
+from outerloop.hermes_install import hermes_ready
 from outerloop.image import ensure_image
 from outerloop.paths import write_private
 
@@ -171,10 +172,15 @@ def cli_install_wanted(author_bin: str, args: argparse.Namespace) -> bool:
     return not author_bin and not args.no_install_harness and not args.github_app
 
 
-def install_harness(backend: str) -> str:
-    """Install a missing author CLI and return its executable host path."""
+def install_harness(backend: str, target: Path | None = None) -> str:
+    """Install a missing harness and return its binary or Hermes source path."""
     name = backend or AUTHOR_BACKENDS[0]
-    target = Path(os.environ.get(author_bin_env(name)) or Path.home() / ".local/bin" / name)
+    if target is None:
+        target = (
+            Path(os.environ.get("REVIEW_HERMES_REPO") or Path.home() / "hermes-agent")
+            if name == "hermes"
+            else Path(os.environ.get(author_bin_env(name)) or Path.home() / ".local/bin" / name)
+        )
     target = target.expanduser().absolute()
     command = shlex.split(HARNESS_INSTALL[name])
     script = Path(__file__).resolve().parents[2] / command[1]
@@ -183,8 +189,13 @@ def install_harness(backend: str) -> str:
     argv = [command[0], str(script), str(target)]
     try:
         subprocess.run(argv, check=True)
-        if not target.is_file() or not os.access(target, os.X_OK):
-            raise OSError(f"installer did not produce an executable at {target}")
+        ready = (
+            hermes_ready(target)
+            if name == "hermes"
+            else target.is_file() and os.access(target, os.X_OK)
+        )
+        if not ready:
+            raise OSError(f"installer did not produce a complete harness at {target}")
     except (OSError, subprocess.CalledProcessError) as exc:
         raise ValueError(
             f"{name} installation failed: {exc}. Run manually: {shlex.join(argv)}"
@@ -794,7 +805,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--no-install-harness",
         action="store_true",
-        help="skip installing a missing author CLI",
+        help="skip installing a missing author CLI or Hermes judge runtime",
     )
     parser.add_argument("--author-model", dest="author_model", help="climbing author's model")
     parser.add_argument(
@@ -903,6 +914,32 @@ def main(argv: list[str] | None = None) -> int:
     if cli_install_wanted(answers.author_bin, args):
         try:
             answers.author_bin = install_harness(answers.author_backend)
+        except ValueError as exc:
+            print(f"outerloop init: {exc}", file=sys.stderr)
+            return 1
+
+    if not args.github_app:
+        settings = env_file_values(env_path, keys=None)
+        judge_keys = ("OUTERLOOP_PANEL", "REVIEW_BACKEND", "REVIEW_HERMES_REPO")
+        for key in judge_keys:
+            if key in os.environ:
+                settings[key] = os.environ[key]
+            if key in settings:
+                answers.preserved_env[key] = settings[key]
+        from outerloop.panel import parse_lenses
+
+        try:
+            panel = settings.get("OUTERLOOP_PANEL", "")
+            lenses = parse_lenses(panel, answers.author_backend) if panel.strip() else ()
+            needs_hermes = settings.get("REVIEW_BACKEND", "").lower() == "hermes" or any(
+                backend == "hermes" for _, backend, _ in lenses
+            )
+            if needs_hermes:
+                repo = Path(settings.get("REVIEW_HERMES_REPO") or Path.home() / "hermes-agent")
+                repo = repo.expanduser().resolve()
+                if cli_install_wanted(str(repo) if hermes_ready(repo) else "", args):
+                    install_harness("hermes", target=repo)
+                answers.preserved_env["REVIEW_HERMES_REPO"] = str(repo)
         except ValueError as exc:
             print(f"outerloop init: {exc}", file=sys.stderr)
             return 1

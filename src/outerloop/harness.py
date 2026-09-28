@@ -27,6 +27,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
+from outerloop.hermes_install import hermes_ready, hermes_runtime
 from outerloop.image import apptainer_from_env
 
 log = logging.getLogger(__name__)
@@ -1198,11 +1199,8 @@ def _hermes_command(
     openai-api reads OPENAI_API_KEY). --save_sample makes hermes write a JSON
     trajectory to its cwd, which is the machine-readable result channel."""
     argv = [
-        "uv",
-        "run",
-        "--project",
-        str(repo_dir),
-        "python",
+        str(hermes_runtime(repo_dir) / "venv/bin/python"),
+        "-B",
         str(repo_dir / "run_agent.py"),
         f"--query={query}",
         f"--max_turns={max_turns}",
@@ -1277,7 +1275,7 @@ def _parse_hermes_result(
 @dataclass
 class HermesHarness:
     """Headless hermes-agent (Nous Research, MIT) — the OSS backend behind the
-    Harness seam, driven via `uv run <repo>/run_agent.py` from a pinned clone.
+    Harness seam, driven by its installed Python and a pinned `run_agent.py`.
 
     A first-class, interchangeable backend: like claude and codex, its boundary
     is the deployment's (a container where one exists, the ephemeral runner
@@ -1335,16 +1333,23 @@ class HermesHarness:
     extra_args: tuple[str, ...] = field(default_factory=tuple)
     # Apptainer image for session containment, same stance as the other
     # backends: when set, the session runs under `apptainer exec --containall
-    # --cleanenv` seeing only the workspace, the per-run home, and a read-only
-    # bind of the pinned hermes repo. The project venv and uv cache live in
-    # the per-run home (UV_PROJECT_ENVIRONMENT/UV_CACHE_DIR), so the repo
-    # bind stays read-only and nothing survives across runs.
+    # --cleanenv` seeing only the workspace, the per-run home, and read-only
+    # binds of the pinned source and runtime (venv plus standalone Python).
     container_image: str = ""
     apptainer_binary: str = field(default_factory=apptainer_from_env)
 
     def run(
         self, brief_text: str, workspace: Path, resume_session_id: str | None = None
     ) -> SessionResult:
+        repo = Path(self.repo_dir).expanduser().resolve()
+        if not hermes_ready(repo):
+            return _error_result(
+                "environment-unavailable",
+                detail=(
+                    "Hermes environment missing or incomplete; "
+                    f"run bash scripts/install_hermes.sh {repo}"
+                ),
+            )
         transcript_stem = f"{workspace.name}-hermes"
         session_home = workspace.parent / f"{workspace.name}-home"
         try:
@@ -1397,7 +1402,7 @@ class HermesHarness:
             f"The tree to work on is at {workspace.resolve()}."
         )
         command = _hermes_command(
-            Path(self.repo_dir),
+            repo,
             query,
             self.model,
             self.base_url,
@@ -1409,7 +1414,8 @@ class HermesHarness:
         if self.container_image:
             workspace_abs = workspace.resolve()
             home_abs = session_home.resolve()
-            repo_abs = Path(self.repo_dir).resolve()
+            repo_abs = repo
+            runtime_abs = hermes_runtime(repo)
             command = [
                 self.apptainer_binary,
                 "exec",
@@ -1424,6 +1430,8 @@ class HermesHarness:
                 f"{home_abs}:{home_abs}",
                 "--bind",
                 f"{repo_abs}:{repo_abs}:ro",
+                "--bind",
+                f"{runtime_abs}:{runtime_abs}:ro",
                 "--pwd",
                 str(home_abs),
                 self.container_image,
@@ -1431,17 +1439,10 @@ class HermesHarness:
             ]
         try:
             env = session_env(self.api_key, self.key_env, session_home)
-            # the repo bind is read-only: uv builds the project venv and its
-            # cache in the per-run home instead (fresh per run; nothing shared
-            # across sessions)
-            env["UV_PROJECT_ENVIRONMENT"] = str(session_home / "venv")
-            env["UV_CACHE_DIR"] = str(session_home / "uv-cache")
-            env["UV_LINK_MODE"] = "copy"
             if self.container_image:
-                # --cleanenv drops the host env inside the container EXCEPT
-                # APPTAINERENV_* — the key travels via env, never argv
-                for k in (self.key_env, "UV_PROJECT_ENVIRONMENT", "UV_CACHE_DIR", "UV_LINK_MODE"):
-                    env[f"APPTAINERENV_{k}"] = env[k]
+                # --cleanenv drops the host env except APPTAINERENV_*: the key
+                # travels via the environment, never argv
+                env[f"APPTAINERENV_{self.key_env}"] = env[self.key_env]
             # cwd is the per-run home, NOT the workspace: --save_sample writes
             # its trajectory JSON to cwd, and artifacts must never land in the
             # clone (they would enter the diff).
