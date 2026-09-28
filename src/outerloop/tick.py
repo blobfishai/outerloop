@@ -63,6 +63,7 @@ from outerloop.runstate import (
     RunRecord,
     acquire_lease,
     acquire_tick_lease,
+    base_moved_refusal,
     lease_is_stale,
     list_runs,
     load_record,
@@ -619,20 +620,8 @@ def _rebless_candidate(root: Path, record: RunRecord, github: Any, tip: str) -> 
 
     if record.auto_blessed_head:
         return record
-    measured = record.auto_bless_base
-    if record.auto_bless_reason_kind:
-        if record.auto_bless_reason_kind != "base_moved":
-            return record
-    else:
-        sha = r"[0-9a-fA-F]{7,40}"
-        match = re.fullmatch(
-            rf"base moved: \S+ (?:{sha} != measured |tip {sha} moved past measured base )({sha})",
-            record.auto_bless_reason,
-        )
-        if not match:
-            return record
-        measured = match[1]
-    if not measured:
+    waits, measured = base_moved_refusal(record)
+    if not waits or not measured:
         return record
     head = record.auto_publish_head
     if not head:

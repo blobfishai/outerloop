@@ -46,7 +46,9 @@ Versions follow [SemVer](https://semver.org).
   - the move's merge-base is the run's recorded pin, so the base was not
     rewritten under it;
   - the PR reports a conflict-free merge state;
-  - the PR is not on the automatic-merge path, which still needs the fold.
+  - the PR is not on the automatic-merge path, which still needs the fold. That
+    covers a blessed head, and a bless waiting on a base move in either the typed
+    reason or the two legacy reason texts; the tick's re-bless reads the same test.
   A whole tree, a truncated list (300 files or more), an unknown merge state,
   or a GitHub error still notifies.
 

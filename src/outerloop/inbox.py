@@ -21,6 +21,7 @@ from outerloop.brief import MAX_COMMENT_CHARS, cap, code_fence
 from outerloop.github import GitHubClient, GitHubError, is_own_login
 from outerloop.harness import redact
 from outerloop.markers import has_marker
+from outerloop.runstate import base_moved_refusal
 from outerloop.sparse import outside
 from outerloop.verifier import VERIFY_MARKER
 
@@ -705,7 +706,7 @@ def _unseen_by_cone(github: GitHubClient, record: RunRecord, head: str, tip: str
         return False
     if not isinstance(pin, str) or not pin:
         return False
-    if record.auto_blessed_head or record.auto_bless_reason_kind == "base_moved":
+    if record.auto_blessed_head or base_moved_refusal(record)[0]:
         return False
     try:
         moved = github.compare_files(record.target, head, tip)

@@ -7,6 +7,7 @@ still needs its fold, and a base rewritten under a PR's recorded pin.
 
 import subprocess
 import urllib.parse
+from dataclasses import replace
 from typing import cast
 
 import pytest
@@ -169,13 +170,25 @@ def _record(root, pin, head, *, sparse, blessed):
     return record
 
 
+@pytest.mark.parametrize("bless", ["blessed", "legacy-mismatch", "legacy-moved-past"])
 @pytest.mark.parametrize("sparse", [False, True])
-def test_an_automatic_merge_pr_is_still_woken_to_fold(tmp_path, sparse):
+def test_an_automatic_merge_pr_is_still_woken_to_fold(tmp_path, sparse, bless):
     """The automatic merge requires the head to contain the latest tip, so a
-    blessed PR must still be woken to fold a move outside its cone."""
+    PR on that path must still be woken to fold a move outside its cone,
+    whether its head is blessed or its bless waits on the base in either
+    legacy reason text (records from before the typed reason kind)."""
     repo, pin, head, tip = _history(tmp_path)
     root = tmp_path / "runs-root"
-    record = _record(root, pin, head, sparse=sparse, blessed=True)
+    record = _record(root, pin, head, sparse=sparse, blessed=bless == "blessed")
+    if bless != "blessed":
+        reason = {
+            "legacy-mismatch": f"base moved: main {tip[:12]} != measured {pin}",
+            "legacy-moved-past": (
+                f"base moved: origin/main tip {tip[:12]} moved past measured base {pin}"
+            ),
+        }[bless]
+        record = replace(record, auto_bless_reason=reason, auto_bless_reason_kind="")
+        save_record(root, record, NOW)
     github = RealGitHub(repo, head, tip)
     client = cast(GitHubClient, github)
     assert client.compare_files(record.target, head, tip) == (["unrelated/asset.txt"], pin)
@@ -223,3 +236,34 @@ def test_an_unseen_move_on_a_held_pin_wakes_no_one(tmp_path, sparse):
     moved = [m for m in pending(run_dir(root, record.run_id), 0) if m.kind == "base-moved"]
     assert bool(moved) == (not sparse)
     assert wake_pending(run_dir(root, record.run_id), record) == (not sparse)
+
+
+@pytest.mark.parametrize(
+    "kind, reason, expected",
+    [
+        ("base_moved", "base moved: anything", (True, "base0000")),
+        ("other", "contract merge is manual", (False, "")),
+        ("", "base moved: main 1234567 != measured abcdef0", (True, "abcdef0")),
+        (
+            "",
+            "base moved: origin/main tip 1234567 moved past measured base abcdef0",
+            (True, "abcdef0"),
+        ),
+        ("", "panel did not run", (False, "")),
+        ("", "", (False, "")),
+    ],
+)
+def test_base_moved_refusal_reads_the_typed_kind_and_both_legacy_texts(kind, reason, expected):
+    """One recognition, shared by the tick's re-bless and the base-moved notice."""
+    from outerloop.runstate import base_moved_refusal
+
+    record = RunRecord(
+        "run",
+        "org/repo",
+        "task",
+        PARKED,
+        auto_bless_reason=reason,
+        auto_bless_reason_kind=kind,
+        auto_bless_base="base0000",
+    )
+    assert base_moved_refusal(record) == expected

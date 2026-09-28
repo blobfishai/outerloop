@@ -711,6 +711,7 @@ def test_check_log_and_base_tip_messages(tmp_path, caplog, tip, dirty, status):
         ("rewritten", True),  # the merge-base is not the recorded pin
         ("blessed", True),  # automatic merge needs the fold
         ("bless-waits-on-base", True),  # a fold re-arms the automatic merge
+        ("legacy-bless-text", True),  # the same, recorded before the typed kind
     ],
 )
 def test_base_moved_notice_skips_a_move_the_cone_cannot_see(tmp_path, caplog, case, notified):
@@ -738,6 +739,11 @@ def test_base_moved_notice_skips_a_move_the_cone_cannot_see(tmp_path, caplog, ca
         stage=stage,
         auto_blessed_head="abc" if case == "blessed" else "",
         auto_bless_reason_kind="base_moved" if case == "bless-waits-on-base" else "",
+        auto_bless_reason=(
+            "base moved: main tip abc1234 moved past measured base def5678"
+            if case == "legacy-bless-text"
+            else ""
+        ),
     )
     pr = {
         "head": {"sha": "abc"},
