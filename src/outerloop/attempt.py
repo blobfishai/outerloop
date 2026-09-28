@@ -2711,7 +2711,18 @@ def resume_run(
         }
         record = dc_replace(record, stage=stage)
 
-    if record.pr_url and stage.get("phase") == "author-sleep":
+    refresh_measurement_base = bool(record.pr_url)
+    if not refresh_measurement_base and stage.get("phase") == "author-sleep":
+        # Before its first PR, an ordinary author also needs the current base:
+        # otherwise folding a fetched improvement passes preflight while the
+        # gate still credits that improvement against the old baseline. A
+        # research line can have its own measured tip; its existing advance
+        # check below owns that pin instead.
+        prior_contract = load_contract(contract_at(ws, str(stage["base_sha"])), record.target)
+        prior_bench = _benchmark(prior_contract, record.benchmark)
+        refresh_measurement_base = not _line_ref_for(prior_bench, record.agent_id)
+
+    if refresh_measurement_base and stage.get("phase") == "author-sleep":
         base_branch = str(stage.get("base_branch") or base_branch)
         # base_sha is the wake-time pin; merge and inbox checks use ancestry.
         # A tip that moved only outside the cone pins what HEAD already holds.

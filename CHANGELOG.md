@@ -8,6 +8,13 @@ Versions follow [SemVer](https://semver.org).
 
 ### Fixed
 
+- An author waking before its first PR refreshes its measurement base and
+  contract along with submission freshness. Folding an upstream improvement
+  can no longer pass preflight while comparing against the old baseline.
+  Research-line baselines and already-dispatched candidate pairs keep their
+  existing pins; moves outside a sparse cone still require no fold.
+  Upgrading: existing author-sleep records need no migration. Their next wake
+  refreshes the pin from trusted base history; completed measurements stay intact.
 - Measurement caches are versioned by checkout policy and cone: evaluation identities and baseline cache directories include them, so a result measured on a session-narrowed tree (before the sparse-state pin) or under another cone is never reused.
 - A session that narrowed its own checkout in a whole-tree workspace no longer has the hidden files sealed as deletions (a false out-of-scope refusal): an absent file the session's index marks skip-worktree reads as unchanged, and evals still measure it.
 - Terminal notebook recovery restores the run's contract cone before sealing,
