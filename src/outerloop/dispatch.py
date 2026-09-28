@@ -28,6 +28,7 @@ import contextlib
 import json
 import logging
 import math
+import os
 import re
 import shlex
 import shutil
@@ -46,6 +47,7 @@ from outerloop.github import (
 )
 from outerloop.image import apptainer_from_env
 from outerloop.orchestrator import EvalError, managed_eval_env, metric_from_output
+from outerloop.sparse import cone_patterns, git_pins, outside
 
 log = logging.getLogger(__name__)
 
@@ -154,7 +156,13 @@ def snapshot_tree(
         # splits `-c` at the FIRST '='. The env form takes key and value as
         # SEPARATE strings, immune to that — and to dots. See _filter_neutral_env.
         neutral = _filter_neutral_env(base_git, env)
-        run_env = {**env, **neutral}
+        # This fresh index is staged from the WORKING TREE, so sparse
+        # checkout stays OFF for it whatever the session configured; for a
+        # kernel cone, the entries the cone leaves out are marked
+        # skip-worktree below — an absent out-of-cone file then reads as
+        # unchanged, never as a deletion, while a session file anywhere is
+        # still staged for the scope check to see.
+        run_env = {**env, **_with_pairs(neutral, git_pins(()))}
 
         def run(args: list[str], timeout: int) -> str:
             return subprocess.run(
@@ -171,6 +179,26 @@ def snapshot_tree(
         # seed from the base so ignore rules apply as they do to a populated
         # index (a fresh empty index would drop tracked-but-ignored files)
         run([*git, "read-tree", base_sha], 60)
+        cone = tuple(getattr(ws, "sparse", ()) or ())
+        if cone:
+            # only an out-of-cone file that is ABSENT reads as unchanged; one
+            # on disk (a restored line file, or a session edit the scope check
+            # must see) is staged exactly as in a whole-tree workspace
+            listed = run([*git, "ls-files", "-z"], 120).split("\0")
+            root = Path(ws.root)
+            hidden = [
+                p for p in outside((p for p in listed if p), cone) if not os.path.lexists(root / p)
+            ]
+            if hidden:
+                subprocess.run(
+                    [*git, "update-index", "--skip-worktree", "-z", "--stdin"],
+                    input="".join(f"{p}\0" for p in hidden),
+                    env=_git_env(run_env),
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
         run([*git, "add", "-A"], 120)
         if force:
             run([*git, "add", "-f", "--", *force], 60)
@@ -245,6 +273,39 @@ def _filter_neutral_env(base_git: list[str], env: dict[str, str]) -> dict[str, s
     return out
 
 
+def _materialize_lines(safe_git: str, snapshot_sha: str, sparse: tuple[str, ...]) -> str:
+    """The job's shell condition that checks `snapshot_sha` out at "$TREE"
+    from "$REPO": a plain `worktree add` for a whole tree (sparse checkout is
+    pinned off in the job's env), or, for a kernel cone, `--no-checkout`, the
+    cone's pattern file written into the new worktree's own admin dir, and a
+    checkout from it. No shared config is written, so concurrent jobs on one
+    workspace (a paired baseline/candidate) cannot contend on its lock."""
+    sha = shlex.quote(snapshot_sha)
+    if not sparse:
+        return (
+            f'git -C "$REPO" {safe_git} worktree add --detach "$TREE" {sha} >> "$EV/setup.log" 2>&1'
+        )
+    return (
+        f'git -C "$REPO" {safe_git} worktree add --no-checkout --detach "$TREE" {sha} '
+        '>> "$EV/setup.log" 2>&1 '
+        f'&& ADMIN="$(git -C "$TREE" {safe_git} rev-parse --absolute-git-dir)" '
+        '&& mkdir -p "$ADMIN/info" '
+        f'&& printf %s {shlex.quote(cone_patterns(sparse))} > "$ADMIN/info/sparse-checkout" '
+        f'&& git -C "$TREE" {safe_git} read-tree -mu HEAD >> "$EV/setup.log" 2>&1'
+    )
+
+
+def _with_pairs(config_env: dict[str, str], pairs: list[tuple[str, str]]) -> dict[str, str]:
+    """`config_env` (GIT_CONFIG_COUNT/KEY_n/VALUE_n) with `pairs` appended."""
+    out = dict(config_env)
+    start = int(out.get("GIT_CONFIG_COUNT", "0"))
+    for i, (k, v) in enumerate(pairs, start):
+        out[f"GIT_CONFIG_KEY_{i}"] = k
+        out[f"GIT_CONFIG_VALUE_{i}"] = v
+    out["GIT_CONFIG_COUNT"] = str(start + len(pairs))
+    return out
+
+
 def drop_snapshot(ws: Workspace, snapshot: Snapshot) -> None:
     """Release the retaining ref (the commit becomes gc-eligible again). Called
     once the eval result has been read. Best-effort — it never RAISES, so a
@@ -303,8 +364,15 @@ def write_eval_job(
     gpus: int = 0,
     array: int = 1,
     seed_cache: Path | None = None,
+    sparse: tuple[str, ...] = (),
 ) -> Path:
     """Write the orchestrator-authored job script for one dispatched eval.
+
+    `sparse` is the kernel's cone (sparse.py): the job checks the snapshot
+    out through a pattern file it writes itself — never the patterns `git
+    worktree add` would copy from the session-written workspace — and an
+    empty cone pins sparse checkout off, so the measured tree is the whole
+    committed tree whatever the session configured.
 
     `seed_cache` names the kernel-warmed seed for this target
     (docs/design/eval-cache.md): the job copies its contents into its own
@@ -366,6 +434,9 @@ def write_eval_job(
     # as the snapshot, injected as GIT_CONFIG_* env (robust to '=' in a driver
     # name, unlike -c) so a smudge filter cannot execute during checkout
     neutral = _filter_neutral_env(["git", "-C", str(repo_root), *SAFE_GIT_FLAGS], {})
+    # sparse checkout pinned to the kernel's cone (off when there is none):
+    # the workspace's own sparse config is session-written
+    neutral = _with_pairs(neutral, git_pins(sparse))
     if array > 1:
         # the task picks its own job dir; under Slurm the index is the array
         # task id, under a local run the caller exports SWEEP_INDEX
@@ -421,9 +492,11 @@ def write_eval_job(
         # GIT_CONFIG_* env above. The worktree's .git gitfile (which would
         # point into $REPO/.git/worktrees, unbound in the jail) is DELETED
         # after checkout, leaving a plain directory; the stale admin entry is
-        # pruned on cleanup.
-        f'if git -C "$REPO" {safe_git} worktree add --detach "$TREE" '
-        f'{shlex.quote(snapshot_sha)} >> "$EV/setup.log" 2>&1; then '
+        # pruned on cleanup. The tree is the kernel's: whole (sparse pinned
+        # off), or the kernel's cone written into this worktree's own admin
+        # dir before the checkout — `worktree add` would otherwise copy the
+        # session-written workspace's patterns (sparse.py).
+        f"if {_materialize_lines(safe_git, snapshot_sha, sparse)}; then "
         'rm -f "$TREE/.git"; '  # plain dir now — nothing points back into $REPO
         'else echo 97 > "$EV/exit-code"; exit 0; fi',
         'export UV_CACHE_DIR="$SCRATCH/cache" UV_LINK_MODE=copy '

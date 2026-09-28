@@ -28,6 +28,38 @@ The knobs that shape a climb, all optional:
 | `max_concurrent_gpus` | The pace ceiling for an author's sweeps, in GPUs: a sweep runs at most this many GPUs' worth of tasks at once (`--array=0-N%K`, K = ceiling / `gpus`). Lenient by design; unset = the author's own pace |
 | `steward.allowed` | Paths a separate stewardship lane may maintain (the ruler, the harness) — never the solver |
 | `merge: manual \| auto` | Whether a gate-and-panel-clean PR waits for a human or merges itself |
+| `workspace.sparse` | For monorepo targets: the directories every tree the kernel builds checks out (see below). Unset = the whole tree |
+
+### Sparse workspaces
+
+On a large monorepo each attempt's clone, each dispatched eval's checkout,
+and each panel read is a full checkout. `workspace.sparse` narrows all of
+them to a cone:
+
+```yaml
+workspace:
+  sparse:
+    - packages/service-a        # what the benchmark commands import and read
+    - tools/bench
+```
+
+A cone holds every root-level file, everything under each listed directory,
+and the files directly inside their parents. The kernel adds what the author
+must see: each `scope.allowed` / `steward.allowed` directory whole, the files
+beside each scope file (and beside the roadmap), and the research line's
+memory — so a one-file scope never drags in its package's unrelated
+subdirectories. Each listed entry must be a directory at the base, or the
+attempt fails before its session starts.
+
+A cone is not a permission: scope still decides what may change. A benchmark
+that needs a path outside the cone fails on both sides of the gate, so name
+everything the benchmark commands read (lockfiles at the root are always
+in). The kernel's cone — never the workspace's own sparse state — decides
+what a sealed snapshot, an eval, or a judge sees: the session can reshape its
+own checkout, but every kernel checkout writes the kernel's patterns itself.
+Sealing reads an absent out-of-cone file as unchanged, and a new file outside
+the cone is still staged, so the scope check sees it. Requires git 2.34 or
+newer.
 
 For GPU benchmarks `gpu_hours_per_run` is a real budget. An author's
 experiment launches and its gate evals (baseline and candidate when paired)

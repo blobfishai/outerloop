@@ -36,6 +36,7 @@ from typing import Any, Protocol
 
 from outerloop.contract import CONTRACT_NAME, find_contract
 from outerloop.markers import legacy_marker, marker
+from outerloop.sparse import cone_patterns, git_pins
 
 
 def bot_login_from_env(default: str = "") -> str:
@@ -1502,7 +1503,11 @@ def _basic(token: str) -> str:
 
 
 def _run_git_with_credential(
-    args: list[str], token: str | None, root: Path | None = None, timeout: float | None = None
+    args: list[str],
+    token: str | None,
+    root: Path | None = None,
+    timeout: float | None = None,
+    sparse: tuple[str, ...] = (),
 ) -> str:
     """_run_git with the token in the environment. An empty token is refused
     before any network call (a provider that yields one is misconfigured,
@@ -1512,7 +1517,7 @@ def _run_git_with_credential(
     if token == "":
         raise GitError("the GitHub token is empty; no credentialed git call is made")
     try:
-        return _run_git(args, _git_env(token, root), timeout=timeout)
+        return _run_git(args, _git_env(token, root, sparse), timeout=timeout)
     except GitError as exc:
         if not token:
             raise
@@ -1520,12 +1525,15 @@ def _run_git_with_credential(
         raise GitError(message) from None
 
 
-def _git_env(token: str | None, root: Path | None = None) -> dict[str, str]:
+def _git_env(
+    token: str | None, root: Path | None = None, sparse: tuple[str, ...] = ()
+) -> dict[str, str]:
     """Environment for a git invocation: host global/system config never
     loads (a host-configured filter driver must not be selectable by a
     session-written .gitattributes), repo-defined filter drivers are
-    overridden to passthrough, and the token — present only for network
-    subcommands — rides an env-injected header."""
+    overridden to passthrough, sparse checkout is pinned to the kernel's
+    cone (`sparse`; off when empty — sparse.py), and the token — present
+    only for network subcommands — rides an env-injected header."""
     env = dict(os.environ)
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GIT_CONFIG_GLOBAL"] = "/dev/null"
@@ -1537,6 +1545,7 @@ def _git_env(token: str | None, root: Path | None = None) -> dict[str, str]:
     # uses replace refs; disable them on every invocation.
     env["GIT_NO_REPLACE_OBJECTS"] = "1"
     pairs = _filter_override_pairs(root)
+    pairs += git_pins(sparse)
     if token is not None:
         pairs.append(
             ("http.https://github.com/.extraheader", f"Authorization: Basic {_basic(token)}")
@@ -1579,16 +1588,60 @@ class Workspace:
     auth: TokenProvider | None = None
     dry_run: bool = False
     url: str | None = None
+    # The kernel's cone (contract `workspace.sparse`, built by
+    # sparse.workspace_cone); empty = the whole tree. Every git call pins
+    # sparse checkout to it, so the session's own sparse state never shapes
+    # a tree the kernel stages, seals, measures or shows a judge.
+    sparse: tuple[str, ...] = ()
 
     def git(self, *args: str) -> str:
         """Run a local git subcommand: no credential, no child-spawning config,
-        repo-defined filter drivers neutralized. A session-reshaped .git is
-        refused before git runs (ensure_regular_git_dir, which also
-        sanitizes the config first)."""
+        repo-defined filter drivers neutralized, sparse checkout pinned to
+        the kernel's cone. A session-reshaped .git is refused before git runs
+        (ensure_regular_git_dir, which also sanitizes the config first)."""
         ensure_regular_git_dir(self.root)
         return _run_git(
-            ["git", "-C", str(self.root), *SAFE_GIT_FLAGS, *args], _git_env(None, self.root)
+            ["git", "-C", str(self.root), *SAFE_GIT_FLAGS, *args],
+            _git_env(None, self.root, self.sparse),
         )
+
+    def add_all(self) -> None:
+        """Stage the whole working tree. In a cone, `--sparse` stages a session
+        file outside the cone too — the scope check then sees it, where a
+        plain add would refuse the whole call. Skip-worktree entries (the
+        paths the cone leaves out) are never read as deletions."""
+        self.git("add", "-A", *(("--sparse",) if self.sparse else ()))
+
+    def apply_sparse(self) -> None:
+        """(Re)impose the kernel's cone on this checkout: the pattern file and
+        the working tree, undoing any sparse state the session set (a
+        widened cone, or none at all, would also cost the disk the cone
+        exists to save). A no-op for a whole-tree workspace."""
+        if self.sparse:
+            # cone entries match sparse._SAFE_DIR: no part starts with "-",
+            # so none can read as an option
+            self.git("sparse-checkout", "set", "--cone", *self.sparse)
+
+    def add_worktree(self, dest: Path, rev: str) -> None:
+        """Materialize `rev` at `dest` as a detached worktree with the KERNEL's
+        cone — never the patterns `git worktree add` would copy from this
+        session-written checkout. A whole-tree workspace checks out
+        everything (sparse pinned off); a cone writes the kernel's pattern
+        file into the new worktree's own admin dir and checks out from it,
+        so concurrent worktrees never write the shared config."""
+        if not self.sparse:
+            self.git("worktree", "add", "--detach", str(dest), rev)
+            return
+        self.git("worktree", "add", "--no-checkout", "--detach", str(dest), rev)
+        env = _git_env(None, self.root, self.sparse)
+        admin = Path(
+            _run_git(
+                ["git", "-C", str(dest), *SAFE_GIT_FLAGS, "rev-parse", "--absolute-git-dir"], env
+            )
+        )
+        (admin / "info").mkdir(exist_ok=True)
+        (admin / "info" / "sparse-checkout").write_text(cone_patterns(self.sparse))
+        _run_git(["git", "-C", str(dest), *SAFE_GIT_FLAGS, "read-tree", "-mu", "HEAD"], env)
 
     def git_network(self, *args: str) -> str:
         """Run a git subcommand that talks to the remote, with credentials.
@@ -1604,6 +1657,7 @@ class Workspace:
             token,
             self.root,
             timeout=NETWORK_GIT_TIMEOUT_S,
+            sparse=self.sparse,
         )
 
     def remote_url(self) -> str:
@@ -1617,10 +1671,23 @@ class Workspace:
         dest: Path,
         auth: TokenProvider | None = None,
         dry_run: bool = False,
+        checkout: bool = True,
     ) -> Workspace:
+        """Clone `url` into `dest`. `checkout=False` leaves the working tree
+        empty, so the caller can read the contract from the objects and set
+        the kernel's cone before the first file is written."""
         token = auth.token() if auth is not None else None
         _run_git_with_credential(
-            ["git", "clone", "--quiet", *SAFE_GIT_FLAGS, url, str(dest)], token
+            [
+                "git",
+                "clone",
+                "--quiet",
+                *(() if checkout else ("--no-checkout",)),
+                *SAFE_GIT_FLAGS,
+                url,
+                str(dest),
+            ],
+            token,
         )
         return cls(root=dest, auth=auth, dry_run=dry_run, url=url)
 
@@ -1645,7 +1712,7 @@ class Workspace:
         off-limits, so the invariant is enforced against the diff, not only
         against the contract's own scope list.
         """
-        self.git("add", "-A")
+        self.add_all()
         staged = self.staged_paths()
         if not staged:
             raise NothingToCommit("nothing to commit; working tree clean")

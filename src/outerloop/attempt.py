@@ -118,6 +118,7 @@ from outerloop.runstate import (
     run_dir as run_dir_of,
 )
 from outerloop.session_control import controlled_author
+from outerloop.sparse import in_cone, workspace_cone
 from outerloop.syscall import (
     MAX_ARTIFACT_BYTES,
     MAX_REPLY_CHARS,
@@ -843,7 +844,12 @@ def with_seed(dispatch: DispatchSettings, run_root: Path, target: str) -> Dispat
 
 
 def _make_launcher(
-    dispatch: DispatchSettings, run_dir: Path, workspace: Path, run_id: str, gpus: int = 0
+    dispatch: DispatchSettings,
+    run_dir: Path,
+    workspace: Path,
+    run_id: str,
+    gpus: int = 0,
+    sparse: tuple[str, ...] = (),
 ):
     """The launch side of the author syscalls, shared by the first pass
     (live_attempt) and the author-sleep wake: each launch becomes a jailed job on
@@ -875,6 +881,7 @@ def _make_launcher(
                 gpus=gpus,
                 array=launch.array,
                 seed_cache=dispatch.seed_cache,
+                sparse=sparse,
             )
             spec = eval_job_spec(
                 script,
@@ -1272,7 +1279,9 @@ def run_author_leg(
         inbox_dir=directory,
         inbox_seq=record.inbox_seq,
         inbox_thread=thread_for(record),
-        launcher=_make_launcher(dispatch, directory, workspace, record.run_id, gpus=bench.gpus)
+        launcher=_make_launcher(
+            dispatch, directory, workspace, record.run_id, gpus=bench.gpus, sparse=ws.sparse
+        )
         if dispatch and owned
         else None,
         watcher=_make_watcher(dispatch, run_root, record.run_id, workspace, config)
@@ -1930,6 +1939,9 @@ def _reset_instruction_files(ws: Workspace, workspace: Path, base_ref: str) -> N
         p
         for p in ws.git("ls-tree", "-r", "--name-only", base_ref).splitlines()
         if any(part in INSTRUCTION_FILES for part in Path(p).parts)
+        # a cone checkout holds only its own paths; one it leaves out is not
+        # in the working tree to reset (and a pathspec checkout refuses it)
+        and in_cone(p, ws.sparse)
     ]
     if base_paths:
         ws.git("checkout", base_ref, "--", *base_paths)
@@ -1940,7 +1952,28 @@ def _reset_instruction_files(ws: Workspace, workspace: Path, base_ref: str) -> N
 # seal (the line branch is exactly where they live) and are excluded from
 # every MEASURABLE seal and from changed-path accounting — never a scope
 # violation, never claimable work, never part of a main-PR candidate.
-LINE_MEMORY_PATHS = ("AGENT_MEMORY.md", "agent_memory")
+LINE_MEMORY_DIR = "agent_memory"
+LINE_MEMORY_PATHS = ("AGENT_MEMORY.md", LINE_MEMORY_DIR)
+
+
+def _kernel_cone(
+    ws: Workspace, contract: Contract, rev: str, benchmark: str, agent_id: str
+) -> tuple[str, ...]:
+    """The kernel's cone for this run's workspace (sparse.py): the contract's
+    `workspace.sparse` at `rev`, plus the line memory folder when this
+    benchmark keeps a research line. () = the whole tree."""
+
+    def kind(path: str) -> str | None:
+        try:
+            return ws.git("cat-file", "-t", f"{rev}:{path}").strip()
+        except GitError:
+            return None
+
+    bench = next((b for b in contract.benchmarks if b.name == benchmark), None)
+    lines = bench is not None and bench.lines and bool(agent_id)
+    return workspace_cone(contract, kind, line_dirs=(LINE_MEMORY_DIR,) if lines else ())
+
+
 # The kernel's own record of the line head, kept in the workspace's refs: a
 # session's `git reset`/`checkout` moves only the checked-out branch, never
 # this ref, so a seal parents on the line the kernel last sealed (#368).
@@ -2244,7 +2277,10 @@ def _reconcile_with_remote(ws: Workspace, old: str, new: str) -> None:
             if target.is_file() or target.is_symlink():
                 target.unlink()
         else:
-            ws.git("checkout", new, "--", path)
+            # in a cone, a path outside it is restored too (a pathspec checkout
+            # would refuse it); on disk, the seal stages it like any other file
+            skip = ("--ignore-skip-worktree-bits",) if ws.sparse else ()
+            ws.git("checkout", *skip, new, "--", path)
 
 
 def _checkout_line(
@@ -2282,7 +2318,7 @@ def _checkout_line(
         )
     _reset_instruction_files(ws, workspace, base_ref)
     if not conflicted:
-        ws.git("add", "-A")
+        ws.add_all()
         if ws.git("status", "--porcelain").strip():
             ws.git(
                 *git_identity(bot_login),
@@ -2353,7 +2389,7 @@ def submission_paths(
     ensure_regular_git_dir(ws.root)
     common = _scope_revision(ws, base_ref, candidate_ref or "HEAD")
     if not candidate_ref:
-        ws.git("add", "-A")
+        ws.add_all()
     try:
         revisions = (common, candidate_ref) if candidate_ref else ("--cached", common)
         paths = ws.git("diff", "--no-renames", "--name-only", "-z", *revisions).split("\0")
@@ -2619,6 +2655,17 @@ def resume_run(
     # its contract must not have the wake gate on the doctored rules.
     contract_text = contract_at(ws, base_sha)
     contract = load_contract(contract_text, record.target)
+    # The kernel's cone at the run's base (sparse.py): every tree this wake
+    # stages, seals, dispatches or shows a judge uses it, and the checkout is
+    # put back on it before the session resumes — whatever the session did
+    # to its own sparse state. A cone that cannot be re-imposed costs disk,
+    # never integrity: seals and job trees apply the kernel's cone
+    # themselves.
+    ws.sparse = _kernel_cone(ws, contract, base_sha, record.benchmark, record.agent_id)
+    try:
+        ws.apply_sparse()
+    except GitError as exc:
+        log.warning("wake %s: could not re-impose the workspace cone: %s", run_id, exc)
     bench = _benchmark(contract, record.benchmark)
     config = RunConfig(target=record.target, benchmark=record.benchmark, agent_id=record.agent_id)
     eval_minutes = next(
@@ -2630,7 +2677,11 @@ def resume_run(
     if declared:
         eval_minutes = declared
     measurer = dispatch.measurer(
-        run_dir, repo_root=workspace, eval_minutes=int(eval_minutes or 0), run_tag=run_id
+        run_dir,
+        repo_root=workspace,
+        eval_minutes=int(eval_minutes or 0),
+        run_tag=run_id,
+        sparse=ws.sparse,
     )
     try:
         measured_paths = tuple(
@@ -3283,7 +3334,7 @@ def build_panel_runner(
         panel_ws = run_dir / "panel"
         shutil.rmtree(panel_ws, ignore_errors=True)
         panel_ws.mkdir(parents=True, exist_ok=True)
-        ws.git("add", "-A")
+        ws.add_all()
         if exclude:
             # the panel judges the CLAIM — the same tree the gate measured,
             # which excludes line memory (docs/design/research-lines.md)
@@ -3300,8 +3351,10 @@ def build_panel_runner(
             "panel snapshot (never pushed)",
         ).strip()
         try:
-            ws.git("worktree", "add", "--detach", str(panel_ws / "base"), base_sha)
-            ws.git("worktree", "add", "--detach", str(panel_ws / "pr-head"), snapshot)
+            # the kernel's cone (or the whole tree), never the patterns the
+            # session-written workspace would lend a plain `worktree add`
+            ws.add_worktree(panel_ws / "base", base_sha)
+            ws.add_worktree(panel_ws / "pr-head", snapshot)
             _renamed, failed = sanitize_checkout(panel_ws / "pr-head")
             if failed:
                 # fail closed for the read, loudly in the transcript: an
@@ -4201,11 +4254,26 @@ def live_attempt(
     # exception path cannot rely on names bound inside the try
     salvage: dict[str, object] = {}
     try:
-        ws = Workspace.clone(target_clone_url(config.target), workspace, auth=bot_auth)
-        # Build ON the requested PR base: the clone checks out the remote
-        # DEFAULT branch, which need not be `base_branch` — the session must
-        # edit, and the gate must measure, the tree the PR will land on.
-        # A missing base branch fails loudly as attempt-error.
+        # Clone WITHOUT a checkout: the contract at the base decides how much
+        # of the tree to write (workspace.sparse), so it is read from the
+        # objects first. A contract that cannot be read or parsed here leaves
+        # the whole tree, and the load below reports it exactly as before.
+        ws = Workspace.clone(
+            target_clone_url(config.target), workspace, auth=bot_auth, checkout=False
+        )
+        try:
+            base_contract = load_contract(contract_at(ws, f"origin/{base_branch}"), config.target)
+        except (GitError, ValueError):
+            base_contract = None
+        if base_contract is not None:
+            ws.sparse = _kernel_cone(
+                ws, base_contract, f"origin/{base_branch}", config.benchmark, config.agent_id
+            )
+            ws.apply_sparse()
+        # Build ON the requested PR base (the remote DEFAULT branch need not
+        # be `base_branch`) — the session must edit, and the gate must
+        # measure, the tree the PR will land on. A missing base branch fails
+        # loudly as attempt-error.
         ws.git("checkout", "-q", "-B", base_branch, f"origin/{base_branch}")
         _exclude_merge_artifacts(workspace)
         contract_text = contract_text_in_tree(workspace)
@@ -4414,7 +4482,11 @@ def live_attempt(
         if dispatched:
             assert dispatch is not None and eval_minutes is not None  # should_dispatch(None) False
             measurer = dispatch.measurer(
-                run_dir, repo_root=workspace, eval_minutes=eval_minutes, run_tag=run_id
+                run_dir,
+                repo_root=workspace,
+                eval_minutes=eval_minutes,
+                run_tag=run_id,
+                sparse=ws.sparse,
             )
         else:
             measurer = DispatchedMeasurer(
@@ -4431,6 +4503,7 @@ def live_attempt(
                 # an inline gate shares the same target-wide baseline cache
                 baseline_cache=run_dir.parent / "baselines",
                 seed_cache=dispatch.seed_cache if dispatch is not None else None,
+                sparse=ws.sparse,
             )
         snapshots: list[Snapshot] = []
 
@@ -4453,7 +4526,12 @@ def live_attempt(
         if author_syscalls:
             assert dispatch is not None  # folded into author_syscalls above
             launcher = _make_launcher(
-                dispatch, run_dir, workspace, run_id, gpus=_bench.gpus if _bench else 0
+                dispatch,
+                run_dir,
+                workspace,
+                run_id,
+                gpus=_bench.gpus if _bench else 0,
+                sparse=ws.sparse,
             )
 
         def acknowledge(seq: int) -> None:
