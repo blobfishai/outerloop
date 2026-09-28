@@ -2698,8 +2698,10 @@ def resume_run(
     # remote config), the session only ever reads local refs. `sleep`
     # thereby doubles as the author's sync primitive. Best-effort: a fetch
     # outage must not cost the wake.
+    base_fetched = False
     try:
         ws.fetch_origin()
+        base_fetched = True
     except Exception as exc:
         log.warning("wake fetch failed for %s: %s", run_id, exc)
     scope_base = f"refs/remotes/origin/{stage.get('base_branch') or base_branch}"
@@ -2723,7 +2725,7 @@ def resume_run(
         record = dc_replace(record, stage=stage)
 
     refresh_measurement_base = bool(record.pr_url)
-    if not refresh_measurement_base and stage.get("phase") == "author-sleep":
+    if base_fetched and not refresh_measurement_base and stage.get("phase") == "author-sleep":
         # Before its first PR, an ordinary author also needs the current base:
         # otherwise folding a fetched improvement passes preflight while the
         # gate still credits that improvement against the old baseline. A
@@ -2732,6 +2734,8 @@ def resume_run(
         # A measured line tip can carry a prior author's contract edits, and
         # the author can retarget the checkout's launch ref. Classify from
         # the canonical base fetched above, including for legacy records.
+        # On fetch failure, keep the recorded baseline: cached origin refs
+        # are also author-writable and cannot authorize changing that pin.
         prior_contract = load_contract(contract_at(ws, pinned_tip), record.target)
         prior_bench = _benchmark(prior_contract, record.benchmark)
         refresh_measurement_base = not _line_ref_for(prior_bench, record.agent_id)

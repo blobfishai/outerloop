@@ -15,7 +15,8 @@ Versions follow [SemVer](https://semver.org).
   during a turn, checkpointing before measuring an outdated pair. Research-line
   ownership comes from the canonical base contract, so earlier line edits cannot
   reset its baseline. Already-dispatched candidate pairs keep their pins;
-  moves outside a sparse cone still require no fold.
+  moves outside a sparse cone still require no fold. A failed canonical fetch
+  preserves the recorded measurement base instead of trusting cached refs.
   Upgrading: existing author-sleep records need no migration. Their next wake
   refreshes the pin from trusted base history; completed measurements stay intact.
 - Measurement caches are versioned by checkout policy and cone: evaluation identities and baseline cache directories include them, so a result measured on a session-narrowed tree (before the sparse-state pin) or under another cone is never reused.
