@@ -1997,6 +1997,8 @@ def test_panel_key_preflight_blocks_claim_and_launch(tmp_path: Path, monkeypatch
     from outerloop.intake import RELEASE_MARKER
 
     def failing_runner(argv, timeout_s):
+        if argv[0] == "sacct":
+            return CommandResult(0, "COMPLETED\n", "")
         return CommandResult(1, "", "sbatch: error")
 
     gh2 = IntakeGitHub()
@@ -2021,6 +2023,8 @@ def test_panel_key_preflight_blocks_claim_and_launch(tmp_path: Path, monkeypatch
     submitted2: list[str] = []
 
     def runner2(argv, timeout_s):
+        if argv[0] == "sacct":
+            return CommandResult(0, "COMPLETED\n", "")
         submitted2.append(" ".join(argv))
         return CommandResult(0, "77\n", "")
 
@@ -2038,6 +2042,7 @@ def test_panel_key_preflight_blocks_claim_and_launch(tmp_path: Path, monkeypatch
 
     clear_pending(tmp_path, "org/pilot")
     clear_pending(tmp_path, "org/pilot", "agent-01")
+    clear_pending(tmp_path, "org/pilot", "intake-5")
     out_low = service_self_initiated(
         tmp_path, SlurmCompute(runner=runner_low), low, contract, NOW + 4000
     )
@@ -2630,6 +2635,7 @@ roadmap: docs/roadmap.md
         tmp_path,
         RunRecord(
             run_id="w1",
+            run_job_id="101",
             target="org/pilot",
             task_title="t",
             state=ENDED,
@@ -4625,3 +4631,46 @@ def test_sigterm_handler_is_installed_before_the_lease(tmp_path, monkeypatch):
     assert mod.main() == 2
     assert seen == [True]
     assert signal.getsignal(signal.SIGTERM) is before  # restored on the way out
+
+
+@pytest.mark.parametrize("state", ["unset", "source-only", "incomplete", "ready"])
+def test_hermes_panel_preflight_runtime(tmp_path, monkeypatch, state):
+    from outerloop.hermes_install import HERMES_SHA, hermes_runtime
+    from outerloop.tick import ServiceSpec, _panel_preflight_error
+
+    image = tmp_path / "image.sif"
+    image.touch()
+    key = tmp_path / "judge-key"
+    key.write_text("judge-secret")
+    key.chmod(0o600)
+    monkeypatch.setenv("OUTERLOOP_PANEL_HERMES_KEY_FILE", str(key))
+    monkeypatch.setenv("REVIEW_HERMES_PROVIDER", "openai")
+    monkeypatch.delenv("REVIEW_HERMES_REPO", raising=False)
+    repo = tmp_path / "hermes"
+    if state != "unset":
+        repo.mkdir()
+        (repo / "run_agent.py").touch()
+        monkeypatch.setenv("REVIEW_HERMES_REPO", str(repo))
+    if state in ("incomplete", "ready"):
+        runtime = hermes_runtime(repo)
+        (runtime / "venv/bin").mkdir(parents=True)
+        python = runtime / "venv/bin/python"
+        python.touch()
+        python.chmod(0o755)
+        if state == "ready":
+            (runtime / ".complete").write_text(HERMES_SHA)
+    spec = ServiceSpec(
+        qos="priority",
+        target="org/pilot",
+        account="a",
+        partition="p",
+        run_root=tmp_path,
+        image=str(image),
+        home=tmp_path,
+        panel="review:hermes:judge-model",
+    )
+    problem = _panel_preflight_error(spec)
+    if state == "ready":
+        assert problem == ""
+    else:
+        assert "bash scripts/install_hermes.sh" in problem

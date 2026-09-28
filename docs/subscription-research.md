@@ -143,7 +143,9 @@ reconciliation command. Keep its records and native history for inspection.
 ## Compatibility and provenance
 
 Fork base: `outerloop-science/outerloop` at
-`224c4c7a48bb62b51537cc5ad46fdf710da21cc3` (package version 0.2.1, Apache-2.0).
+`5563c46cee5371f5056690bc71524af04643580e` (package version 0.2.1, Apache-2.0).
+The initial audit used `224c4c7`; upstream harness pinning and operator-limit
+changes were merged before final qualification.
 The implementation is original code against the existing `Harness.run` protocol.
 No Hopper, Agent Orchestrator or OpenSwarm runtime code is incorporated.
 

@@ -31,6 +31,7 @@ from typing import Any
 from outerloop.hypothesis import MAX_HYPOTHESIS_CHARS as MAX_HYPOTHESIS_CHARS
 from outerloop.hypothesis import report_hypothesis
 from outerloop.inbox import wake_pending
+from outerloop.job_names import run_job_name, run_key
 from outerloop.ledger_branch import RESEARCH_LOG_BRANCH as BOARD_BRANCH
 from outerloop.markers import marker
 from outerloop.runstate import ENDED, PARKED, RunRecord, list_runs, run_dir
@@ -875,11 +876,11 @@ STATUS_PATH = "climb/status.json"
 # The queue view shows the kernel's own jobs only. Fixed-name jobs (the tick
 # chain, issue sessions, climb sessions) are matched by shape; per-run jobs
 # (wake, launch) are matched against the names the kernel itself
-# derives from this target's run ids, with the same 60-character cut Slurm
-# forces on them; an eval's name is a liveness hash and is claimed only
+# derives from this target's run ids, including legacy 60-character cuts
+# and current run keys; an eval is claimed only
 # through its run's marker. Anything else on the account is the operator's
 # and never leaves the cluster.
-JOB_NAME_LIMIT = 60
+LEGACY_JOB_NAME_LIMIT = 60
 FIXED_JOB_PATTERNS = tuple(
     re.compile(p)
     for p in (
@@ -912,10 +913,13 @@ def run_job_names(
             continue
         rid, agent = record.run_id, record.agent_id
         for name, prefix in (
-            (f"wake-{rid}", False),
+            (f"wake-{rid}"[:LEGACY_JOB_NAME_LIMIT], False),  # legacy 60-character names
+            (f"{rid}-launch-"[:LEGACY_JOB_NAME_LIMIT], True),
+            (run_job_name(rid, prefix="wake-"), False),
             (f"{rid}-launch-", True),
+            (f"{run_key(rid)}-launch-", True),
         ):
-            key = name[:JOB_NAME_LIMIT]
+            key = name
             if key in out and out[key][0] != rid:
                 # two runs whose names collide under the cut: the job is still
                 # the kernel's, but nobody can say whose, so it is claimed by none
@@ -974,7 +978,8 @@ def queue_rows(
         elif name in expected and not expected[name][2]:  # wake, exact
             run_id, agent = expected[name][:2]
         elif any(name.startswith(k) for k, v in expected.items() if v[2]):  # a launch
-            run_id, agent = next(v[:2] for k, v in expected.items() if v[2] and name.startswith(k))
+            key = max((k for k, v in expected.items() if v[2] and name.startswith(k)), key=len)
+            run_id, agent = expected[key][:2]
         elif is_fixed_kernel_job(name):
             found = _AGENT_RE.search(name)
             agent = found.group(0) if found else ""

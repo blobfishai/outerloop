@@ -51,6 +51,14 @@ START_KEYS = (
 # local loop has no deploy step, so start exports them once at launch; a test
 # keeps this list identical to tick_deploy.sh's.
 TICK_ENV_KEYS = (
+    "OUTERLOOP_CLAUDE_VERSION",
+    "OUTERLOOP_CODEX_VERSION",
+    "OUTERLOOP_CLAUDE_SHA256",
+    "OUTERLOOP_CODEX_SHA256",
+    "OUTERLOOP_HERMES_REF",
+    "OUTERLOOP_HERMES_SHA",
+    "OUTERLOOP_CACHE_ROOT",
+    "REVIEW_BACKEND",
     "OUTERLOOP_AUTHOR_BACKEND",
     "OUTERLOOP_AUTHOR_MODEL",
     "OUTERLOOP_CLAUDE_MODEL",
@@ -825,11 +833,16 @@ def main(argv: list[str] | None = None) -> int:
         "--pre", action="store_true", help="include pre-releases even once a stable exists"
     )
     up.add_argument("--dry-run", action="store_true", help="print the command and exit")
+    sub.add_parser("harness", help="inspect or upgrade harness installations", add_help=False)
     argv = sys.argv[1:] if argv is None else list(argv)
     if argv[:1] == ["research"]:
         from outerloop import research_cli
 
         return research_cli.main(argv[1:])
+    if argv[:1] == ["harness"]:
+        from outerloop.harness_cli import main as harness_main
+
+        return harness_main(argv[1:])
     if argv[:1] == ["tick"]:
         # the tick entry owns its own parser; hand it the rest untouched
         from outerloop import tick
@@ -841,6 +854,8 @@ def main(argv: list[str] | None = None) -> int:
         from outerloop import init
 
         return init.main(argv[1:])
+    p = sub.add_parser("limits", help="show live operator ceilings and fleet GPU usage")
+    p.add_argument("--root", help="state root (defaults to OUTERLOOP_ROOT or ~/.outerloop)")
     p = sub.add_parser("permissions", help="check and update the App's required permissions")
     p.add_argument("--open", action="store_true", help="open the next permission settings page")
     p = sub.add_parser("migrate-ledger", help="seed research-log from a pinned main ledger")
@@ -853,6 +868,23 @@ def main(argv: list[str] | None = None) -> int:
         from outerloop.ledger_migrate import migrate
 
         return migrate(args)
+    if args.command == "limits":
+        from outerloop.compute import compute_from_env
+        from outerloop.operator_limits import CapacityError, report
+
+        values = env_file_values(keys=None)
+        root = Path(
+            args.root
+            or os.environ.get("OUTERLOOP_ROOT")
+            or values.get("OUTERLOOP_ROOT")
+            or DEFAULT_LOCAL_ROOT
+        ).expanduser()
+        try:
+            print(report(root, compute_from_env()))
+        except CapacityError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        return 0
     if args.command == "permissions":
         return permissions(args)
     if args.command == "upgrade":

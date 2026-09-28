@@ -53,6 +53,7 @@ from outerloop.inbox import (
     render_inbox,
 )
 from outerloop.inbox import pending as pending_messages
+from outerloop.operator_limits import CapacityError
 from outerloop.panel import PanelVerdict
 from outerloop.role_runner import run_role
 from outerloop.roles import author_spec
@@ -147,7 +148,9 @@ class RunParked(Exception):
         eval_minutes: int | None = None,
         judged: tuple[str, str, AttemptResult] | None = None,
         launch_afterany: str = "",
+        capacity_wait: bool = False,
     ):
+        self.capacity_wait = capacity_wait
         self.phase = phase
         # the author's launch jobs alone (a candidate park's `afterany` also
         # carries the gate's evals): the wake reconciles their charge
@@ -1115,6 +1118,7 @@ def resume_attempt(
         raise RunParked(
             phase="candidate",
             afterany=pending.afterany(),
+            capacity_wait=pending.capacity_wait,
             base_sha=base_sha,
             seed=seed,
             suite_seed=suite_seed,
@@ -1769,7 +1773,6 @@ def attempt_once(
                     break
                 # a launch park: its launches are dispatched right below, so
                 # they are charged now
-                gpu_hours_used += launches_gpu_hours(request, gpus=bench.gpus)
                 # Scope BEFORE the snapshot, same invariant as the candidate
                 # path below: an out-of-scope tree is never snapshotted OR
                 # executed — the out-of-scope edit could be to the ruler
@@ -1788,22 +1791,27 @@ def attempt_once(
                     )
                 sha = snapshot()
                 assert launcher is not None
-                launch_afterany = launcher(sha, request)
-                raise RunParked(
-                    phase="author-sleep",
-                    judged=failed_gate,
-                    afterany=launch_afterany,
-                    launch_afterany=launch_afterany,
-                    base_sha=base_sha,
-                    seed=run_seed,
-                    suite_seed=suite_seed,
-                    candidate_sha=sha,
-                    session=session,
-                    syscall=request,
-                    launches_used=launches_used + len(request.launches),
-                    sleeps_used=sleeps_used + 1,
-                    gpu_hours_used=gpu_hours_used,
-                )
+                try:
+                    launch_afterany = launcher(sha, request)
+                except CapacityError as exc:
+                    problem = str(exc)
+                else:
+                    gpu_hours_used += launches_gpu_hours(request, gpus=bench.gpus)
+                    raise RunParked(
+                        phase="author-sleep",
+                        judged=failed_gate,
+                        afterany=launch_afterany,
+                        launch_afterany=launch_afterany,
+                        base_sha=base_sha,
+                        seed=run_seed,
+                        suite_seed=suite_seed,
+                        candidate_sha=sha,
+                        session=session,
+                        syscall=request,
+                        launches_used=launches_used + len(request.launches),
+                        sleeps_used=sleeps_used + 1,
+                        gpu_hours_used=gpu_hours_used,
+                    )
             if refused_once or not _can_resume():
                 if stale_submit:
                     return AttemptResult(
@@ -1929,12 +1937,36 @@ def attempt_once(
             launch_afterany = ""
             if submitted is not None and submitted.launches:
                 assert launcher is not None  # a submit only arrives through it
-                launch_afterany = launcher(candidate_sha, submitted)
-                launches_used += len(submitted.launches)
-                gpu_hours_used += launches_gpu_hours(submitted, gpus=bench.gpus)
+                try:
+                    launch_afterany = launcher(candidate_sha, submitted)
+                except CapacityError as exc:
+                    append(
+                        inbox_dir,
+                        Message(
+                            0,
+                            "note",
+                            "kernel",
+                            inbox_thread,
+                            time.time(),
+                            f"capacity-refusal:{session.session_id}:{sleeps_used}",
+                            {
+                                "text": (
+                                    "Your sibling launch request was REFUSED "
+                                    "and nothing was launched."
+                                ),
+                                "quoted_text": str(exc),
+                            },
+                            origin=inbox_dir.name,
+                        ),
+                    )
+                    submitted = dc_replace(submitted, launches=())
+                else:
+                    launches_used += len(submitted.launches)
+                    gpu_hours_used += launches_gpu_hours(submitted, gpus=bench.gpus)
             raise RunParked(
                 phase="candidate",
                 afterany=_merge_afterany(pending.afterany(), launch_afterany),
+                capacity_wait=pending.capacity_wait,
                 launch_afterany=launch_afterany,
                 base_sha=base_sha,
                 seed=run_seed,

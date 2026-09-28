@@ -12,7 +12,6 @@ has ended; the session sees only its own capped API key inside its container.
 from __future__ import annotations
 
 import argparse
-import contextlib
 import fcntl
 import json
 import logging
@@ -66,6 +65,7 @@ from outerloop.harness import (
 )
 from outerloop.hypothesis import report_hypothesis
 from outerloop.inbox import Message, append, panel_payload, thread_for
+from outerloop.job_names import run_job_name
 from outerloop.launchlog import append_ended, append_submitted, experiments_rows
 from outerloop.ledger_branch import RESEARCH_LOG_BRANCH as RESEARCH_LOG_BRANCH
 from outerloop.ledger_branch import LedgerWriteError, progress_link
@@ -587,6 +587,7 @@ def _park_run(
     stage: dict[str, object] = {
         **{k: latest.stage[k] for k in STAGE_RETAINED_KEYS if k in latest.stage},
         "phase": parked.phase,
+        "capacity_wait": parked.capacity_wait,
         "base_sha": parked.base_sha,
         "candidate_sha": parked.candidate_sha,
         "candidate_ref": candidate_ref,
@@ -713,7 +714,9 @@ def _park_run(
         and parked.syscall is not None
         and not parked.syscall.launches
     )
-    if checkpoint_sleep:
+    if parked.capacity_wait and not job_ids:
+        deadline = now + 60
+    elif checkpoint_sleep:
         # a CHECKPOINT SLEEP has nothing in any queue, so the 12h queue slack
         # (sized to protect queued Slurm jobs from cancel-on-pending) does not
         # apply — the deadline needs only to reach the sweep's next pass.
@@ -737,7 +740,9 @@ def _park_run(
             # no-progress re-park — results still pending, or a blind re-park
             # (squeue unreachable, nothing new dispatched) — must KEEP the
             # counter (`keep_wake_attempts`), or the loop never reaches the cap.
-            "wake_attempts": record.wake_attempts if keep_wake_attempts else 0,
+            "wake_attempts": (
+                record.wake_attempts if keep_wake_attempts and not parked.capacity_wait else 0
+            ),
             "terminal_seen": 0.0,
         }
     )
@@ -848,49 +853,46 @@ def _make_launcher(
 
     def launcher(sha: str, request: SyscallRequest) -> str:
         from outerloop.dispatch import eval_job_spec, write_eval_job
+        from outerloop.operator_limits import run_target, state_root, submit_batch
         from outerloop.syscall import array_spec
 
-        ids: list[str] = []
-        try:
-            for launch in request.launches:
-                # a sweep is ONE Slurm job array (`--array=0-N%K`): the queue
-                # holds one entry, Slurm runs at most K tasks at once, each task
-                # derives its job dir and SWEEP_INDEX from its array index, and
-                # one afterany on the array id covers every task
-                script = write_eval_job(
-                    run_dir,
-                    f"launch-{launch.name}",
-                    repo_root=workspace,
-                    snapshot_sha=sha,
-                    command=launch.command,
-                    image=dispatch.image,
-                    artifacts=launch.artifacts,
-                    artifact_max_bytes=MAX_ARTIFACT_BYTES,
-                    gpus=gpus,
-                    array=launch.array,
-                    seed_cache=dispatch.seed_cache,
-                )
-                spec = eval_job_spec(
-                    script,
-                    job_name=f"{run_id}-launch-{launch.name}",
-                    account=account,
-                    qos=dispatch.qos,
-                    partition=partition,
-                    eval_minutes=launch.minutes,
-                    gpus=gpus,
-                    nice=LAUNCH_NICE,
-                    array=array_spec(launch),
-                )
-                ids.append(dispatch.compute.submit(spec))
-        except Exception:
-            # a partial batch must not orphan: no park record was written yet,
-            # so nothing would ever wake or cancel the jobs that DID submit —
-            # reap them here, then let the caller end the run as the error it
-            # is (same stance as the failed-_park_run cancel).
-            for job_id in ids:
-                with contextlib.suppress(Exception):
-                    dispatch.compute.cancel(job_id)
-            raise
+        specs = []
+        for launch in request.launches:
+            # a sweep is ONE Slurm job array (`--array=0-N%K`): the queue
+            # holds one entry, Slurm runs at most K tasks at once, each task
+            # derives its job dir and SWEEP_INDEX from its array index, and
+            # one afterany on the array id covers every task
+            script = write_eval_job(
+                run_dir,
+                f"launch-{launch.name}",
+                repo_root=workspace,
+                snapshot_sha=sha,
+                command=launch.command,
+                image=dispatch.image,
+                artifacts=launch.artifacts,
+                artifact_max_bytes=MAX_ARTIFACT_BYTES,
+                gpus=gpus,
+                array=launch.array,
+                seed_cache=dispatch.seed_cache,
+            )
+            spec = eval_job_spec(
+                script,
+                job_name=run_job_name(run_id, suffix=f"-launch-{launch.name}"),
+                account=account,
+                qos=dispatch.qos,
+                partition=partition,
+                eval_minutes=launch.minutes,
+                gpus=gpus,
+                nice=LAUNCH_NICE,
+                array=array_spec(launch),
+            )
+            specs.append(spec)
+        ids = submit_batch(
+            state_root(run_dir),
+            run_target(run_dir),
+            dispatch.compute,
+            specs,
+        )
         # a checkpoint sleep (no launches) parks with no dependency and wakes
         # on the sweep's deadline floor — slow but correct; a fast requeue wake
         # is a follow-up.
