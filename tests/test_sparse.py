@@ -661,3 +661,28 @@ def test_submit_preflight_needs_the_pin_in_an_unfolded_head(tmp_path):
     _git(origin, "push", "-q", str(bare), "main")
 
     assert attempt._submit_preflight(ws, "main", pin).status == "stale"
+
+
+def test_submit_preflight_counts_a_rewritten_base_as_moved(tmp_path):
+    """A pin the fresh tip no longer descends from is outdated even when the
+    rewrite changed nothing the cone can see: publish could not seal onto it."""
+    from outerloop import attempt
+
+    origin = _repo(tmp_path)
+    (origin / "data/stripe/t.json").write_text("the pinned base\n")
+    _git(origin, "commit", "-qam", "pinned base")
+    bare = tmp_path / "origin.git"
+    _git(origin, "clone", "--bare", str(origin), str(bare))
+    ws = Workspace.clone(str(bare), tmp_path / "ws", checkout=False)
+    ws.sparse = ("pkg/a",)
+    ws.apply_sparse()
+    ws.git("checkout", "-q", "-B", "main", "origin/main")
+    pin = ws.git("rev-parse", "HEAD").strip()
+    (ws.root / "pkg/a/x.py").write_text("candidate\n")
+    ws.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "candidate")
+    _git(origin, "reset", "-q", "--hard", "HEAD~1")
+    (origin / "data/github/t.json").write_text("a rewritten base\n")
+    _git(origin, "commit", "-qam", "rewritten base")
+    _git(origin, "push", "-q", "--force", str(bare), "main")
+
+    assert attempt._submit_preflight(ws, "main", pin).status == "outdated-pin"

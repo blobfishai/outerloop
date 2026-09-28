@@ -2173,7 +2173,9 @@ def _submit_preflight(ws: Workspace, base_branch: str, pinned_tip: str) -> Submi
             return SubmitPreflight("stale", tip, base_branch)
         if not pinned_tip:
             return SubmitPreflight("unknown", tip, base_branch)
-        pin_current = not _moved_in_cone(ws, pinned_tip, tip, ws.sparse)
+        pin_current = pinned_tip == tip or (
+            _is_ancestor(ws, pinned_tip, tip) and not _moved_in_cone(ws, pinned_tip, tip, ws.sparse)
+        )
         return SubmitPreflight("ready" if pin_current else "outdated-pin", tip, base_branch)
     except Exception as exc:
         if isinstance(exc, GitError) and _is_git_tamper(exc):
@@ -3787,11 +3789,12 @@ def publish(
         if pr.get("state") == "closed" or pr.get("merged"):
             return refuse("Publish refused: the PR is closed.")
         fresh_base = _rev(ws, f"origin/{base_branch}")
-        # A base that moved only outside the cone measures the same, and the
-        # sealed commit still contains its pin, so the push reverts nothing.
+        # A base that moved on past the pin only outside the cone measures the
+        # same, and the sealed commit still contains its pin.
         if (
             not fresh_base
             or _moved_in_cone(ws, base_sha, fresh_base, ws.sparse)
+            or not _is_ancestor(ws, base_sha, fresh_base)
             or not _is_ancestor(ws, base_sha, result.candidate_sha)
         ):
             return refuse(
@@ -3852,15 +3855,18 @@ def publish(
                 title = (result.submit_report or "").splitlines()
                 summary = redact(title[0].strip(), secrets) if title else ""
                 try:
-                    common = ws.git("merge-base", base_sha, head).strip()
+                    # The newest base commit the sealed candidate holds: its pin,
+                    # or a later base the author folded, never an unseen tip.
+                    folded = ws.git("merge-base", result.candidate_sha, fresh_base).strip()
+                    common = ws.git("merge-base", folded, head).strip()
                 except Exception as exc:
                     return refuse(
                         "Publish refused: cannot confirm PR base ancestry.",
                         quoted_text=redact(str(exc), secrets),
                     )
                 parents = ["-p", head]
-                if common != base_sha:
-                    parents += ["-p", base_sha]
+                if common != folded:
+                    parents += ["-p", folded]
                 pushed_sha = ws.git(
                     *git_identity(config.bot_login),
                     "commit-tree",
