@@ -2456,13 +2456,13 @@ def _panel_preflight_error(spec: ServiceSpec) -> str:
             FileTokenProvider(key_path).token()
             if lens_backend == "hermes":
                 repo = os.environ.get("REVIEW_HERMES_REPO", "").strip()
-                # a REAL clone, not merely a directory: the harness executes
-                # run_agent.py from it with the panel key, so an arbitrary or
-                # empty path must fail here, never after a run is claimed
-                if not repo or not (Path(repo).expanduser() / "run_agent.py").is_file():
+                from outerloop.hermes_install import hermes_ready
+
+                if not repo or not hermes_ready(Path(repo).expanduser()):
                     return (
-                        f"a hermes panel lens needs REVIEW_HERMES_REPO pointing at "
-                        f"the pinned clone (run_agent.py not found under {repo!r})"
+                        "a hermes panel lens needs the pinned source and runtime; "
+                        "run bash scripts/install_hermes.sh "
+                        f"{repo or '$REVIEW_HERMES_REPO'}"
                     )
                 from outerloop.role_runner import _HERMES_PROVIDERS
 

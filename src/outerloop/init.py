@@ -920,7 +920,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.github_app:
         settings = env_file_values(env_path, keys=None)
-        judge_keys = ("OUTERLOOP_PANEL", "REVIEW_BACKEND", "REVIEW_HERMES_REPO")
+        judge_keys = (
+            "OUTERLOOP_PANEL",
+            "REVIEW_BACKEND",
+            "REVIEW_MODEL",
+            "REVIEW_HERMES_PROVIDER",
+            "REVIEW_HERMES_REPO",
+        )
         for key in judge_keys:
             if key in os.environ:
                 settings[key] = os.environ[key]

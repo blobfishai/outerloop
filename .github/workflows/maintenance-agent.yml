@@ -124,36 +124,13 @@ jobs:
               npm install -g @openai/codex@0.130.0
               ;;
             hermes)
-              verify_hermes() {
-                [ -d "$GITHUB_WORKSPACE/hermes-agent/.git" ] &&
-                  [ "$(git -C "$GITHUB_WORKSPACE/hermes-agent" rev-parse HEAD 2>/dev/null)" = "$HERMES_SHA" ] &&
-                  [ -z "$(git -C "$GITHUB_WORKSPACE/hermes-agent" status --porcelain 2>/dev/null)" ]
-              }
-              if verify_hermes; then
-                echo "hermes-agent already present (pinned sha verified)"
-              else
-                # anonymous clone of the public pinned tag, retried through the
-                # anonymous rate limit; an unverified tree never runs with a key
-                rm -rf "$GITHUB_WORKSPACE/hermes-agent"
-                for i in 1 2 3 4 5 6; do
-                  if git clone --depth 1 --branch "$HERMES_REF" \
-                      https://github.com/NousResearch/hermes-agent \
-                      "$GITHUB_WORKSPACE/hermes-agent"; then
-                    break
-                  fi
-                  if [ "$i" = 6 ]; then
-                    echo "hermes clone failed after 6 attempts" >&2
-                    exit 0  # advisory: the CLI's missing-repo stub surfaces it
-                  fi
-                  sleep $(( i * 10 + RANDOM % 10 ))
-                  rm -rf "$GITHUB_WORKSPACE/hermes-agent"
-                done
-                if ! verify_hermes; then
-                  echo "hermes-agent does not match pinned sha $HERMES_SHA — refusing" >&2
-                  rm -rf "$GITHUB_WORKSPACE/hermes-agent"
-                  exit 0  # advisory: the missing-repo stub surfaces it
-                fi
-              fi
+              # The kernel checkout supplies the same installer used by local init.
+              # It verifies both pins, retries anonymous clones, and builds the runtime.
+              # advisory: a failed install must not turn CI red; the harness then
+              # reports the missing runtime on the PR
+              bash "$GITHUB_WORKSPACE/.autoresearch/scripts/install_hermes.sh" \
+                "$GITHUB_WORKSPACE/hermes-agent" \
+                || echo "hermes install failed; the review will report it" >&2
               ;;
             claude)
               curl -fsSL https://claude.ai/install.sh | bash -s -- 2.1.229
@@ -235,36 +212,13 @@ jobs:
               npm install -g @openai/codex@0.130.0
               ;;
             hermes)
-              verify_hermes() {
-                [ -d "$GITHUB_WORKSPACE/hermes-agent/.git" ] &&
-                  [ "$(git -C "$GITHUB_WORKSPACE/hermes-agent" rev-parse HEAD 2>/dev/null)" = "$HERMES_SHA" ] &&
-                  [ -z "$(git -C "$GITHUB_WORKSPACE/hermes-agent" status --porcelain 2>/dev/null)" ]
-              }
-              if verify_hermes; then
-                echo "hermes-agent already present (pinned sha verified)"
-              else
-                # anonymous clone of the public pinned tag, retried through the
-                # anonymous rate limit; an unverified tree never runs with a key
-                rm -rf "$GITHUB_WORKSPACE/hermes-agent"
-                for i in 1 2 3 4 5 6; do
-                  if git clone --depth 1 --branch "$HERMES_REF" \
-                      https://github.com/NousResearch/hermes-agent \
-                      "$GITHUB_WORKSPACE/hermes-agent"; then
-                    break
-                  fi
-                  if [ "$i" = 6 ]; then
-                    echo "hermes clone failed after 6 attempts" >&2
-                    exit 0  # advisory: the CLI's missing-repo stub surfaces it
-                  fi
-                  sleep $(( i * 10 + RANDOM % 10 ))
-                  rm -rf "$GITHUB_WORKSPACE/hermes-agent"
-                done
-                if ! verify_hermes; then
-                  echo "hermes-agent does not match pinned sha $HERMES_SHA — refusing" >&2
-                  rm -rf "$GITHUB_WORKSPACE/hermes-agent"
-                  exit 0  # advisory: the missing-repo stub surfaces it
-                fi
-              fi
+              # The kernel checkout supplies the same installer used by local init.
+              # It verifies both pins, retries anonymous clones, and builds the runtime.
+              # advisory: a failed install must not turn CI red; the harness then
+              # reports the missing runtime on the PR
+              bash "$GITHUB_WORKSPACE/.autoresearch/scripts/install_hermes.sh" \
+                "$GITHUB_WORKSPACE/hermes-agent" \
+                || echo "hermes install failed; the review will report it" >&2
               ;;
             claude)
               curl -fsSL https://claude.ai/install.sh | bash -s -- 2.1.229

@@ -71,6 +71,7 @@ jobs:
       - name: Install the ${{ inputs.backend }} backend
         env:
           HERMES_REF: v2026.8.13
+          HERMES_SHA: f80f453ae0679347e38abc917c7f94f717bf96c5
         run: |
           set -euo pipefail
           case "$BACKEND" in
@@ -78,9 +79,13 @@ jobs:
               npm install -g @openai/codex@0.130.0
               ;;
             hermes)
-              git clone --depth 1 --branch "$HERMES_REF" \
-                https://github.com/NousResearch/hermes-agent \
-                "$GITHUB_WORKSPACE/hermes-agent"
+              # The kernel checkout supplies the same installer used by local init.
+              # It verifies both pins, retries anonymous clones, and builds the runtime.
+              # advisory: a failed install must not turn CI red; the harness then
+              # reports the missing runtime on the PR
+              bash "$GITHUB_WORKSPACE/.autoresearch/scripts/install_hermes.sh" \
+                "$GITHUB_WORKSPACE/hermes-agent" \
+                || echo "hermes install failed; the review will report it" >&2
               ;;
             *)
               curl -fsSL https://claude.ai/install.sh | bash -s -- 2.1.229

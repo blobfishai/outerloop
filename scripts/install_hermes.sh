@@ -4,6 +4,8 @@
 # can dirty the checkout or be removed by its git clean. Both source and the
 # whole runtime are bound read-only at their host paths during contained runs.
 # .complete is written last; reruns reuse a completed runtime for this pin.
+# The venv links to its interpreter by absolute path: build a runtime in place,
+# never copy one to another location.
 #
 # Usage: install_hermes.sh [target_dir]
 #   target_dir  where the clone lives (default: $REVIEW_HERMES_REPO,
@@ -20,9 +22,41 @@ WANT="v2026.8.13"
 WANT_SHA="f80f453ae0679347e38abc917c7f94f717bf96c5"
 TARGET="${1:-${REVIEW_HERMES_REPO:-$HOME/hermes-agent}}"
 
+# Workflows pass their pins too: refuse drift before touching either artifact.
+if [ "${HERMES_REF:-$WANT}" != "$WANT" ] || [ "${HERMES_SHA:-$WANT_SHA}" != "$WANT_SHA" ]; then
+    echo "hermes-agent: workflow and installer pins disagree — refusing" >&2
+    exit 1
+fi
+# Canonicalize before locking, including when the source does not exist yet.
+mkdir -p "$(dirname "$TARGET")"
+if [ -d "$TARGET" ]; then
+    TARGET=$(cd "$TARGET" && pwd -P)
+else
+    TARGET="$(cd "$(dirname "$TARGET")" && pwd -P)/$(basename "$TARGET")"
+fi
+LOCK="${TARGET}.installing"
+# One source-specific lock covers clone/re-pin AND runtime creation/reuse.
+if ! mkdir "$LOCK" 2>/dev/null; then
+    echo "hermes-agent: installation in progress; if interrupted, remove $LOCK and retry" >&2
+    exit 1
+fi
+trap 'rmdir "$LOCK"' EXIT
+
 if [ ! -d "$TARGET/.git" ]; then
-    git clone --depth 1 --branch "$WANT" \
-        https://github.com/NousResearch/hermes-agent "$TARGET"
+    # Public foreign repository: clone anonymously, never with a job's
+    # repo-scoped GitHub token. Retry cold fan-out/rate-limit failures.
+    for i in 1 2 3 4 5 6; do
+        if git clone --depth 1 --branch "$WANT" \
+            https://github.com/NousResearch/hermes-agent "$TARGET"; then
+            break
+        fi
+        if [ "$i" = 6 ]; then
+            echo "hermes clone failed after 6 attempts" >&2
+            exit 1
+        fi
+        sleep $(( i * 10 + RANDOM % 10 ))
+        rm -rf "$TARGET"
+    done
 fi
 head=$(git -C "$TARGET" rev-parse HEAD)
 dirty=$(git -C "$TARGET" status --porcelain)
@@ -40,7 +74,6 @@ if [ "$head" != "$WANT_SHA" ]; then
     echo "hermes-agent: tag $WANT resolves to $head, expected $WANT_SHA — refusing" >&2
     exit 1
 fi
-TARGET=$(cd "$TARGET" && pwd -P)
 RUNTIME="${TARGET}.runtime/$WANT_SHA"
 if [ -f "$RUNTIME/.complete" ] && [ "$(cat "$RUNTIME/.complete")" = "$WANT_SHA" ] && \
    [ -x "$RUNTIME/venv/bin/python" ]; then
@@ -48,12 +81,6 @@ if [ -f "$RUNTIME/.complete" ] && [ "$(cat "$RUNTIME/.complete")" = "$WANT_SHA" 
     exit 0
 fi
 mkdir -p "$RUNTIME"
-# Refuse concurrent provisioning; an interrupted build has no completion marker.
-if ! mkdir "$RUNTIME/.installing" 2>/dev/null; then
-    echo "hermes-agent: installation in progress; if interrupted, remove $RUNTIME/.installing and retry" >&2
-    exit 1
-fi
-trap 'rmdir "$RUNTIME/.installing"' EXIT
 rm -f "$RUNTIME/.complete"
 export UV_PYTHON_INSTALL_DIR="$RUNTIME/python"
 export UV_PROJECT_ENVIRONMENT="$RUNTIME/venv"
@@ -61,7 +88,7 @@ export UV_CACHE_DIR="$RUNTIME/cache"
 export UV_PYTHON_PREFERENCE=only-managed
 export UV_LINK_MODE=copy
 uv python install --no-bin 3.12
-python=$(uv python find 3.12)  # UV_PYTHON_PREFERENCE=only-managed restricts the search
+python=$(uv python find --system 3.12)  # UV_PYTHON_PREFERENCE=only-managed restricts the search
 case "$python" in
     "$RUNTIME/python/"*) ;;
     *) echo "hermes-agent: Python must live under $RUNTIME/python" >&2; exit 1 ;;

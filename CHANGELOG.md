@@ -8,6 +8,9 @@ Versions follow [SemVer](https://semver.org).
 
 ### Fixed
 
+- CI Hermes provisioning uses the shared runtime installer with anonymous clone retries and matching workflow pins. A source-specific lock protects checkout and runtime mutations; Python discovery excludes active virtualenvs.
+- Panel preflight checks Hermes runtime readiness and explains installation; full init preserves review model and provider settings with environment precedence.
+
 - Contained Hermes sessions can start with read-only source; sessions no longer reinstall dependencies or attempt an editable project build.
 
 ### Changed
