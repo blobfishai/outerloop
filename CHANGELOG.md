@@ -8,6 +8,7 @@ Versions follow [SemVer](https://semver.org).
 
 ### Fixed
 
+- A session that narrowed its own checkout in a whole-tree workspace no longer has the hidden files sealed as deletions (a false out-of-scope refusal): an absent file the session's index marks skip-worktree reads as unchanged, and evals still measure it.
 - Subscription research keeps Codex's native tool host enabled for live web
   search while disabling shell, unified execution, image and extension tools.
 

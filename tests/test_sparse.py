@@ -297,6 +297,38 @@ def _sparse_workspace(tmp_path: Path, dirs: tuple[str, ...]) -> Workspace:
     return ws
 
 
+def _whole_tree_workspace(tmp_path: Path) -> Workspace:
+    origin = _repo(tmp_path)
+    ws = Workspace.clone(str(origin), tmp_path / "ws")
+    _git(ws.root, "config", "user.email", "t@t")
+    _git(ws.root, "config", "user.name", "t")
+    return ws
+
+
+def test_seal_keeps_what_a_session_hid_in_a_whole_tree_workspace(tmp_path):
+    """Regression: with sparse pinned off, a session that narrowed its own
+    checkout had the hidden files sealed as DELETIONS (a false out-of-scope
+    refusal). An absent file the session's index marks skip-worktree is
+    unchanged; the eval still measures it."""
+    ws = _whole_tree_workspace(tmp_path)
+    base = ws.git("rev-parse", "HEAD")
+    _session_hides_stripe(ws.root)
+    (ws.root / "pkg" / "a" / "x.py").write_text("edited\n")
+    snap = snapshot_tree(ws, base)
+    assert set(ws.git("ls-tree", "-r", "--name-only", snap.commit).split("\n")) == set(FILES)
+    assert ws.git("show", f"{snap.commit}:pkg/a/x.py") == "edited"
+    assert ws.git("diff", "--name-only", base, snap.commit) == "pkg/a/x.py"
+    assert _measured_tree(tmp_path, ws.root, snap.commit, ()) == set(FILES)
+
+
+def test_seal_still_records_a_real_deletion(tmp_path):
+    ws = _whole_tree_workspace(tmp_path)
+    base = ws.git("rev-parse", "HEAD")
+    (ws.root / "src" / "m.py").unlink()
+    snap = snapshot_tree(ws, base)
+    assert "src/m.py" not in ws.git("ls-tree", "-r", "--name-only", snap.commit).split("\n")
+
+
 def test_snapshot_stages_an_out_of_cone_file_that_is_on_disk(tmp_path):
     """Only an ABSENT out-of-cone file reads as unchanged. One on disk — a
     restored line file, or a session edit the scope check must see — is

@@ -180,15 +180,30 @@ def snapshot_tree(
         # index (a fresh empty index would drop tracked-but-ignored files)
         run([*git, "read-tree", base_sha], 60)
         cone = tuple(getattr(ws, "sparse", ()) or ())
-        if cone:
-            # only an out-of-cone file that is ABSENT reads as unchanged; one
-            # on disk (a restored line file, or a session edit the scope check
-            # must see) is staged exactly as in a whole-tree workspace
-            listed = run([*git, "ls-files", "-z"], 120).split("\0")
-            root = Path(ws.root)
-            hidden = [
-                p for p in outside((p for p in listed if p), cone) if not os.path.lexists(root / p)
-            ]
+        root = Path(ws.root)
+
+        def listing(args: list[str], env: dict[str, str]) -> list[str]:
+            out = subprocess.run(
+                args, env=_git_env(env), check=True, capture_output=True, text=True, timeout=120
+            ).stdout
+            return [p for p in out.split("\0") if p]
+
+        # An ABSENT file reads as unchanged — never a deletion — when the
+        # kernel's cone leaves it out, or when the session's own index marks
+        # it skip-worktree (a session that narrowed its own checkout). What
+        # jobs measure is unaffected: they check the sealed commit out with
+        # the kernel's sparse state. A file ON DISK is always staged, so the
+        # scope check sees it.
+        real_index_env = {k: v for k, v in run_env.items() if k != "GIT_INDEX_FILE"}
+        session_skipped = {
+            entry[2:]
+            for entry in listing([*git, "ls-files", "-t", "-z"], real_index_env)
+            if entry.startswith("S ")
+        }
+        if cone or session_skipped:
+            listed = listing([*git, "ls-files", "-z"], run_env)
+            candidates = set(outside(listed, cone)) | (session_skipped & set(listed))
+            hidden = sorted(p for p in candidates if not os.path.lexists(root / p))
             if hidden:
                 subprocess.run(
                     [*git, "update-index", "--skip-worktree", "-z", "--stdin"],
