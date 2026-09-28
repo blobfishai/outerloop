@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from outerloop.compute import Compute, JobSpec
+from outerloop.job_names import run_key
 
 log = logging.getLogger(__name__)
 LIMITS_FILE = "limits.toml"
@@ -102,15 +103,16 @@ def gpu_demand(spec: JobSpec) -> int:
 
 
 def usage(root: Path, compute: Compute) -> dict[str, int]:
-    """One scheduler snapshot; read only states whose run IDs occur in job names."""
+    """One scheduler snapshot; attribute full run IDs and shortened stable run keys."""
     jobs = compute.gpu_jobs()
     run_ids = [p.name for p in (root / "runs").iterdir()] if (root / "runs").exists() else []
+    keys = {rid: run_key(rid) for rid in run_ids}
     targets: dict[str, str] = {}
     totals: dict[str, int] = {}
     for name, gpus in jobs:
         if not gpus:
             continue
-        matches = [rid for rid in run_ids if rid in name]
+        matches = [rid for rid in run_ids if rid in name or keys[rid] in name]
         if not matches:
             continue
         # Prefer the full ID if one run's ID is a prefix of another's.

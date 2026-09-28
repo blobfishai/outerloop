@@ -43,6 +43,7 @@ from outerloop.compute import (
 from outerloop.disk import DEFAULT_MIN_FREE_BYTES, check_disk
 from outerloop.harness import DEFAULT_MAX_TURNS, ClaudeModelUnset, default_claude_model, redact
 from outerloop.housekeeping import shed_ended_workspaces
+from outerloop.job_names import run_job_name
 from outerloop.ledger_branch import RESEARCH_LOG_BRANCH as RESEARCH_LOG_BRANCH
 from outerloop.limits import EffectiveLimits, effective_limits
 from outerloop.markers import has_marker, marker
@@ -2300,7 +2301,7 @@ def read_tombstones(root: Path, target: str, contract: Any, now: float) -> dict[
     return out
 
 
-# WIDTH slots are the only suffixed marker names; the pattern also fences
+# WIDTH slots and intake issue IDs use suffixed marker names; the pattern also fences
 # list_pendings against a longer target that shares this one's file-name
 # prefix (org/foo vs org/foobar — "/" encodes as "__", so glob alone is
 # ambiguous)
@@ -2320,7 +2321,7 @@ def _pending_path(root: Path, target: str, agent: str = "") -> Path:
 
 def list_pendings(root: Path, target: str) -> list[tuple[str, dict[str, Any]]]:
     """(agent, marker) for every live pending marker of `target` — one per
-    WIDTH slot, plus the legacy un-suffixed marker from a pre-width deploy
+    WIDTH slot or intake issue, plus the legacy un-suffixed marker from a pre-width deploy
     (attributed to agent-01)."""
     out: list[tuple[str, dict[str, Any]]] = []
     stem = target.replace("/", "__")
@@ -2331,7 +2332,9 @@ def list_pendings(root: Path, target: str) -> list[tuple[str, dict[str, Any]]]:
         name = path.stem
         if name == stem:
             agent = ""
-        elif name.startswith(stem + "@") and _SLOT_AGENT_RE.fullmatch(name[len(stem) + 1 :]):
+        elif name.startswith(stem + "@") and re.fullmatch(
+            r"(?:agent|intake)-\d+", name[len(stem) + 1 :]
+        ):
             agent = name[len(stem) + 1 :]
         else:
             continue  # a longer target sharing this prefix (org/foo vs org/foobar)
@@ -2360,6 +2363,19 @@ def write_pending(
 
 def clear_pending(root: Path, target: str, agent: str = "") -> None:
     _pending_path(root, target, agent).unlink(missing_ok=True)
+
+
+def _pending_landed(pending: dict[str, Any], records: list[RunRecord], target: str) -> bool:
+    agent = str(pending.get("agent_id", ""))
+    job_id = str(pending.get("job_id", ""))
+    if agent.startswith("intake-"):
+        return any(r.target == target and r.run_job_id == job_id for r in records)
+    return any(
+        r.target == target
+        and r.created >= float(pending["submitted_at"]) - 60
+        and (not agent or r.agent_id == agent)
+        for r in records
+    )
 
 
 def _attempt_width(contract: Any) -> int:
@@ -2636,12 +2652,7 @@ def service_self_initiated(
             # matching on target+time alone would let a sibling slot's
             # record clear a still-live marker (terra #173). A legacy
             # marker names no slot, so it keeps the lax match.
-            landed = any(
-                r.target == spec.target
-                and r.created >= submitted_at - 60
-                and (not marker_agent or r.agent_id == marker_agent)
-                for r in records
-            )
+            landed = _pending_landed(pending, records, spec.target)
             expired = now - submitted_at > PENDING_TTL_S
             if landed:
                 clear_pending(root, spec.target, marker_agent)
@@ -2654,7 +2665,7 @@ def service_self_initiated(
                 # breaks ties when Slurm can't say.
                 occupied.add(agent)
                 live_pendings.append((str(pending.get("benchmark", "")), submitted_at))
-                if not marker_agent:
+                if not _SLOT_AGENT_RE.fullmatch(marker_agent):
                     # a live un-slotted marker is another lane's submit
                     # (steward/intake, or a pre-width deploy): serial
                     nonslot_busy = True
@@ -2817,15 +2828,9 @@ def service_steward(
         # record yet must block a stewardship the same way an active run
         # does. Liveness first, TTL only breaks unknown ties (queue wait
         # can outlive the TTL).
-        for slot, pending in list_pendings(root, target):
-            marker_agent = "" if not pending.get("agent_id") else slot
+        for _, pending in list_pendings(root, target):
             submitted_at = float(pending.get("submitted_at", 0.0))
-            landed = any(
-                r.target == target
-                and r.created >= submitted_at - 60
-                and (not marker_agent or r.agent_id == marker_agent)
-                for r in records
-            )
+            landed = _pending_landed(pending, records, target)
             expired = now - submitted_at > PENDING_TTL_S
             alive = _holder_alive(compute, str(pending.get("job_id", "")))
             if not landed and (alive is True or (not expired and alive is not False)):
@@ -2956,7 +2961,16 @@ def service_intake(
             contract = load_contract(contract_raw, target)
         operator_width = read_limits(root).value(target, "max_active_attempts")
         if operator_width is not None:
-            active_attempts = sum(r.target == target and r.state != ENDED for r in (records or []))
+            if records is None:
+                records = list_runs(root)
+            active_attempts = sum(r.target == target and r.state != ENDED for r in records)
+            for _, pending in list_pendings(root, target):
+                if _pending_landed(pending, records, target):
+                    continue
+                alive = _holder_alive(compute, str(pending.get("job_id", "")))
+                expired = now - float(pending["submitted_at"]) > PENDING_TTL_S
+                if alive is True or (not expired and alive is not False):
+                    active_attempts += 1
             if active_attempts >= min(operator_width, _attempt_width(contract)):
                 return None
         limits = limits if limits is not None else effective_limits(contract.budgets)
@@ -3063,6 +3077,7 @@ def service_intake(
                     f"it for a human).",
                 )
             raise
+        write_pending(root, target, task.benchmark, job_id, now, agent=f"intake-{task.number}")
         log.info("issue #%s claimed for climb job %s", task.number, job_id)
         return (f"issue-{task.number}", job_id)
     except Exception as exc:  # intake must not break the tick
@@ -3149,7 +3164,7 @@ class JobWakeDispatcher:
         # config-driven author: `climb --resume` resolves the author key from the
         # PARKED RUN's backend (persisted on its record) inside climb.main — the
         # tick does not thread the key, so a fleet flip picks the right one.
-        name = f"wake-{record.run_id}"
+        name = run_job_name(record.run_id, prefix="wake-")
         afterany = str(record.stage.get("afterany", ""))
         return submit(
             self.spec.run_root,

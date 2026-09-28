@@ -8,6 +8,9 @@ Versions follow [SemVer](https://semver.org).
 
 ### Fixed
 
+- Run-owned launch, evaluation, and wake job names stay within 128 characters, retaining a stable run key when shortened. Normal names stay unchanged; GPU usage, queue attribution, evaluation deduplication, and flight retention recognize the bounded names.
+- Intake admission counts queued attempts using the existing pending markers, including jobs queued beyond the marker TTL.
+
 - GPU accounting accepts Slurm 25.05 wrapped numeric fields and legacy integers, recognizes typed GPU requests and per-node counts, and limits pending array remainders to available throttle slots.
 
 ### Added
@@ -16,6 +19,8 @@ Versions follow [SemVer](https://semver.org).
 - Read-only `outerloop limits` reports operator ceilings and fleet-owned running/pending GPU usage.
 
 ### Upgrading
+
+- Upgrading: full run-ID names and legacy 60-character queue names remain readable; shortened names use a derived run key without changing run records. Intake adds `@intake-<issue>` files in the existing pending directory; legacy unsuffixed and agent-slot markers remain readable. Drain queued intake jobs from older submitters (which wrote no marker) before relying on attempt ceilings. Upgrade all kernels together; older kernels do not recognize shortened names or intake markers, so drain those jobs before rollback.
 
 - Upgrading: the optional `stage.capacity_wait` flag tolerates missing fields; existing state records need only their target for scheduler attribution. No contract schema change or admission journal. Drain older jobs whose names omit the full run ID (and older local jobs without scheduler metadata), and upgrade all submitters before relying on ceilings. Concurrent admissions may overshoot by one batch for two simultaneous checks; no cross-node admission lock.
 

@@ -2042,6 +2042,7 @@ def test_panel_key_preflight_blocks_claim_and_launch(tmp_path: Path, monkeypatch
 
     clear_pending(tmp_path, "org/pilot")
     clear_pending(tmp_path, "org/pilot", "agent-01")
+    clear_pending(tmp_path, "org/pilot", "intake-5")
     out_low = service_self_initiated(
         tmp_path, SlurmCompute(runner=runner_low), low, contract, NOW + 4000
     )

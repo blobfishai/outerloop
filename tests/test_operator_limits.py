@@ -234,6 +234,10 @@ def test_tick_submission_paths(tmp_path, monkeypatch, lane):
     limits(tmp_path, "[defaults]\nmax_gpus=1\n")
     assert call() is not None
     assert backend.submit.call_count == 1
+    if lane == "intake":
+        limits(tmp_path, "[defaults]\nmax_active_attempts=1\n")
+        assert call() is None
+        assert backend.submit.call_count == 1
 
 
 @pytest.mark.parametrize("lane", ["self", "intake", "steward"])
@@ -466,3 +470,117 @@ def test_two_concurrent_admissions_accept_documented_race(tmp_path):
         ids = list(workers.map(lambda _: submit(tmp_path, TARGET, backend, spec()), range(2)))
     assert len(ids) == 2
     assert set(p.name for p in tmp_path.iterdir()) == {"limits.toml"}
+
+
+@pytest.mark.parametrize(
+    "rid", ["bench-20260927-123456-agent-01", "b" * 64 + "-20260927-123456-" + "a" * 64]
+)
+def test_bounded_names_attribution_dedupe_and_queue(tmp_path, monkeypatch, rid):
+    from outerloop.climbboard import queue_rows
+    from outerloop.job_names import run_key
+    from outerloop.operator_limits import usage
+    from outerloop.watcher import SessionWatcher, WatcherContext
+
+    record = RunRecord(
+        rid, TARGET, "work", "parked", agent_id="agent-01", stage={"afterany": "afterany:101"}
+    )
+    save_record(tmp_path, record, 1)
+    directory = tmp_path / "runs" / rid
+    backend = compute()
+    launcher = _make_launcher(
+        DispatchSettings(backend, "", "", ""), directory, tmp_path / "ws", rid, gpus=2
+    )
+    launcher("sha", SyscallRequest(launches=(Launch("probe", "true", 1),)))
+    launch_name = backend.submit.call_args.args[0].job_name
+    measurer = DispatchedMeasurer(backend, directory, tmp_path / "repo", "", "", "", 1)
+    measure = Measure("candidate", "sha", "echo", "value", gpus=1)
+    measurer._dispatch(measure)
+    eval_name = backend.submit.call_args.args[0].job_name
+    # Simulate interruption before persisting the submission marker.
+    (measurer._ev(measure) / "submitted").unlink()
+    backend.job_id_for_name.side_effect = lambda name: "101" if name == eval_name else ""
+    with pytest.raises(MeasurementPending) as caught:
+        measurer.results([measure])
+    assert caught.value.job_ids == ("101",)
+    assert backend.submit.call_count == 2
+    commands = []
+
+    def flight_command(home, name, *args):
+        commands.append(name)
+        return "true"
+
+    monkeypatch.setattr(tick, "_flight_command", flight_command)
+    service = tick.ServiceSpec("", "", tmp_path, "", tmp_path, target=TARGET, panel="")
+    dispatcher = tick.JobWakeDispatcher(backend, service, 1000)
+    assert tick.arm_wake(tmp_path, record, dispatcher, 1000, holder_job_id="") == "102"
+    assert tick.arm_wake(tmp_path, record, dispatcher, 1001, holder_job_id="") == ""
+    assert backend.submit.call_count == 3
+    wake_name = backend.submit.call_args.args[0].job_name
+    assert commands == [wake_name]
+    names = [launch_name, eval_name, wake_name]
+    assert all(len(name) <= 128 for name in names)
+    if len(rid) > 128:
+        assert all(run_key(rid) in name for name in names)
+    else:
+        assert launch_name == f"{rid}-launch-probe"
+        assert wake_name == f"wake-{rid}"
+        assert eval_name.startswith(f"eval-{rid}-candidate-")
+    backend.gpu_jobs.return_value = list(zip(names, [2, 1, 1], strict=True))
+    assert usage(tmp_path, backend) == {TARGET: 4}
+    # Legacy records need only target for usage; queue ownership uses full records.
+    snapshot = [{"id": "100", "name": launch_name}, {"id": "102", "name": wake_name}]
+    assert [row["run_id"] for row in queue_rows(tmp_path, TARGET, snapshot)] == [rid, rid]
+    backend.queue_snapshot.return_value = snapshot
+    watcher = SessionWatcher(
+        WatcherContext(
+            workspace=tmp_path / "ws",
+            run_root=tmp_path,
+            run_id=rid,
+            target=TARGET,
+            agent_id="agent-01",
+            compute=backend,
+        )
+    )
+    view = watcher.queue_view()
+    launch_row = next(row for row in view["jobs"] if row["id"] == "100")
+    assert launch_row["mine"] and launch_row["kind"] == "launch"
+    assert launch_row["experiment"] == "probe"
+    # Flight retention sees precisely the submitted (possibly shortened) name.
+    home = tmp_path / "home"
+    flight = tmp_path / "flights" / f"{wake_name[:40]}-old"
+    flight.mkdir(parents=True, exist_ok=True)
+    assert tick.reap_flights(home, 10**12, live_job_names=[wake_name]) == 0
+    assert flight.exists()
+
+
+@pytest.mark.parametrize("pending_agent", ["agent-01", "intake-1", ""])
+def test_intake_counts_queued_attempts(tmp_path, monkeypatch, pending_agent):
+    contract = load_contract(CONTRACT, TARGET)
+    service = tick.ServiceSpec("", "", tmp_path, "", tmp_path, target=TARGET)
+    backend = compute()
+    pick = Mock(return_value=None)
+    monkeypatch.setattr("outerloop.intake.pick_issue", pick)
+    limits(tmp_path, "[defaults]\nmax_active_attempts=1\n")
+    tick.write_pending(tmp_path, TARGET, "bench", "100", 1, agent=pending_agent)
+    if not pending_agent:
+        # Pre-width fixture: the unsuffixed marker had no agent_id field.
+        (tmp_path / "pending" / "owner__repo.json").write_text(
+            '{"benchmark":"bench","job_id":"100","submitted_at":1}'
+        )
+    # Queued jobs retain their slot even beyond the marker TTL, including retries.
+    for now in (1000000, 1000001):
+        tick.service_intake(tmp_path, Mock(), backend, service, now, contract=contract, records=[])
+        pick.assert_not_called()
+    backend.status.return_value = "COMPLETED"
+    tick.service_intake(tmp_path, Mock(), backend, service, 1000000, contract=contract, records=[])
+    pick.assert_called_once()
+
+
+def test_intake_pending_lands_only_on_its_own_job(tmp_path):
+    tick.write_pending(tmp_path, TARGET, "bench", "100", 1000, agent="intake-1")
+    tick.write_pending(tmp_path, TARGET, "bench", "101", 1000, agent="intake-2")
+    markers = tick.list_pendings(tmp_path, TARGET)
+    assert len(markers) == 2
+    record = RunRecord("run", TARGET, "work", "running", created=1000, run_job_id="100")
+    assert tick._pending_landed(markers[0][1], [record], TARGET)
+    assert not tick._pending_landed(markers[1][1], [record], TARGET)

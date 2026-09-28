@@ -65,6 +65,7 @@ from outerloop.harness import (
 )
 from outerloop.hypothesis import report_hypothesis
 from outerloop.inbox import Message, append, panel_payload, thread_for
+from outerloop.job_names import run_job_name
 from outerloop.launchlog import append_ended, append_submitted, experiments_rows
 from outerloop.ledger_branch import RESEARCH_LOG_BRANCH as RESEARCH_LOG_BRANCH
 from outerloop.ledger_branch import LedgerWriteError, progress_link
@@ -876,7 +877,7 @@ def _make_launcher(
             )
             spec = eval_job_spec(
                 script,
-                job_name=f"{run_id}-launch-{launch.name}",
+                job_name=run_job_name(run_id, suffix=f"-launch-{launch.name}"),
                 account=account,
                 qos=dispatch.qos,
                 partition=partition,

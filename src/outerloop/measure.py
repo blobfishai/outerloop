@@ -31,6 +31,7 @@ from outerloop.dispatch import (
     read_eval_result,
     write_eval_job,
 )
+from outerloop.job_names import run_job_name
 from outerloop.orchestrator import EvalError
 
 log = logging.getLogger(__name__)
@@ -336,7 +337,7 @@ class DispatchedMeasurer:
         # are for a human reading squeue.
         h = hashlib.sha1(f"{self.run_tag}\0{self._det(m)}".encode()).hexdigest()[:16]
         run_id = self.run_dir.name if self.run_dir.parent.name == "runs" else self.run_tag
-        return f"eval-{run_id}-{m.name[:12]}-{h}"
+        return run_job_name(run_id, prefix="eval-", suffix=f"-{m.name[:12]}-{h}")
 
     def _done(self, m: Measure) -> bool:
         return (self._ev(m) / "exit-code").exists()
