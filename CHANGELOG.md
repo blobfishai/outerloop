@@ -28,6 +28,15 @@ Versions follow [SemVer](https://semver.org).
 
 ### Added
 
+- Native Codex and Claude Code authors publish redacted live events and preserve
+  their session identity across failed turns. A durable generation and process
+  group record refuses overlapping author writers after controller restart.
+- Upgrading: legacy run records need no backfill. The first controlled author
+  turn creates `session-control/` beside the workspace; retain it with the native
+  home when moving a run. Drain authors before upgrading or downgrading. Older
+  kernels do not enforce this sidecar's writer ownership. See
+  [author session control](docs/design/session-control.md) for recovery limits.
+
 - Packaged `harnesses.toml` owns Claude, Codex, and Hermes pins. `outerloop harness status` reports installed versions, paths, drift, and operator overrides; `harness upgrade [name...]` verifies versioned installations before atomically recording their paths. Successful kernel deploys upgrade only configured backends; failures retain the previous installation.
 
 - Live, tighten-only `<root>/limits.toml` GPU and active-attempt ceilings, with global defaults and per-target sections. Scheduler-reported GPU usage covers pending and running experiments, sweeps, evaluations, and GPU-bearing sessions. Authors receive uncharged launch refusals; evaluations wait for capacity. Lowering a ceiling does not cancel jobs.
