@@ -526,6 +526,71 @@ message delivery, GitHub polling, self-merge sweep, board, and ending records
 continue; existing runs keep spending, including their panels, author sessions,
 and the authors' own `launch` submissions.
 
+**Live operator ceilings.** Create `<root>/limits.toml` to limit this fleet while
+leaving target contracts under their normal review process:
+
+```toml
+[defaults]
+max_gpus = 8
+max_active_attempts = 2
+
+[targets."owner/repo"]
+max_gpus = 4
+max_active_attempts = 1
+```
+
+`defaults.max_gpus` caps aggregate fleet usage across this state root. Defaults
+also bound each target; target sections can only tighten them. Attempt widths
+are the minimum of the operator values and the contract's existing
+`max_active_attempts` (default one). GPU ceilings are operator-only;
+`budgets.max_concurrent_gpus` still separately clamps each experiment sweep.
+Omitted keys impose no ceiling; zero stops new admissions for that resource.
+Without a limits file, admission follows the existing behavior and does not
+query scheduler usage or scan run records for limits.
+
+Limits are re-read at admission, including inside existing runs. Invalid TOML,
+unknown keys, unreadable files, negative values, and non-integers are logged and
+fail closed for GPU work and fresh attempts. Replace the file atomically.
+
+Each GPU check with a finite ceiling takes one scheduler snapshot of the user's
+running and pending jobs. A job belongs to this fleet only when its name
+contains a full run ID present under `<root>/runs/`; that run's `state.json`
+provides the target, cached for this check. Unrelated operator jobs do not count.
+Experiments, sweeps, evaluations and wakes retain their full run IDs in names.
+Fresh author/steward session wrappers currently request zero GPUs. The CLI
+starter, tick chain and resident successor are also CPU-only control-plane
+jobs: their zero-GPU submissions are exempt, so a closed ceiling can still be
+observed and retried. Requeued and preempted jobs count as the scheduler
+currently reports them, without consulting job history.
+
+Arrays count running tasks plus pending tasks up to the array throttle (or all
+pending tasks without a throttle), multiplied by GPUs per task. A launch batch
+is checked together before submission. There is deliberately no admission lock
+or reservation ledger: **two simultaneous admissions can see the same usage
+and together exceed the ceiling by at most one batch**. More concurrent
+admissions or delayed scheduler visibility can increase this overshoot. These
+are live admission ceilings, not a scheduler-enforced hard quota.
+
+Over-ceiling experiments receive an author-visible refusal without launch or
+GPU-hour charges. Evaluations wait for capacity; a combined submit retains its
+waiting evaluation while refusing its over-cap sibling launches. Waiting does
+not exhaust wake retries. Lowering a ceiling never cancels existing jobs.
+Scheduler query failures block GPU admissions only when a finite ceiling
+applies; CPU jobs and admissions without a GPU ceiling continue.
+
+`outerloop limits --root <root>` is read-only and reports operator ceilings,
+current fleet/target GPU usage, malformed files and scheduler query failures.
+Attempt widths additionally clamp to the contract loaded by the tick; the
+command does not fetch contracts or retain a contract cache.
+
+**Upgrading:** no admission ledger, lock or contract schema change is needed.
+The optional `stage.capacity_wait` flag defaults to the existing retry policy
+when absent. Old state records need only their existing target field for
+attribution. Older job names that omit or truncate their run ID cannot be
+attributed; drain those jobs and upgrade all submitters before relying on
+ceilings. Local compute stores transient scheduler metadata for active jobs;
+older local jobs lack it and should likewise drain before enabling a ceiling.
+
 **Local mode without an image.** On a machine with no Apptainer image,
 `OUTERLOOP_COMPUTE=local` still runs. Sessions run under the harness's own
 sandbox, evaluations run bare in a throwaway tree under an allowlisted

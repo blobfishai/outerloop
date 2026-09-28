@@ -2297,3 +2297,76 @@ def test_withdraw_consumed_after_session_without_compute(tmp_path):
     assert events == ["session ended", "Superseded"]
     assert result.outcome == "review"
     assert not evaluator.calls
+
+
+def test_gpu_capacity_refusal_reaches_author_without_charging(tmp_path):
+    from outerloop.operator_limits import CapacityError
+
+    _write_syscall(tmp_path, {"launches": [{"name": "probe", "command": "x"}]})
+    calls = []
+    meters = []
+    note = "operator GPU limit: requested 2, reserved/running 4, effective max_gpus 4"
+
+    def launcher(sha, request):
+        calls.append(request)
+        raise CapacityError(note)
+
+    result, harness, _ = run_climb(
+        tmp_path, [], launcher=launcher, on_meter=lambda *args: meters.append(args)
+    )
+    assert result.outcome == "no-improvement"
+    assert "REFUSED" in harness.calls[1][0]
+    assert note in harness.calls[1][0]
+    assert harness.calls[1][2] == "s1"
+    assert meters
+    assert all(launches == sleeps == hours == 0 for launches, sleeps, hours in meters)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("waiting", [False, True])
+def test_sibling_launch_capacity_race_keeps_evaluations_and_notifies_author(tmp_path, waiting):
+    from outerloop.inbox import pending
+    from outerloop.operator_limits import CapacityError
+    from outerloop.orchestrator import RunParked
+
+    _write_syscall(
+        tmp_path,
+        {"launches": [{"name": "probe", "command": "x"}], "submit": True, "report": "candidate"},
+    )
+    directory = tmp_path.parent / (tmp_path.name + "-run")
+
+    def launcher(sha, request):
+        raise CapacityError("operator GPU limit: capacity filled during evaluation dispatch")
+
+    measurer = ParkingMeasurer(park_on_call=1)
+    if waiting:
+        from outerloop.measure import MeasurementPending
+
+        def wait(*args, **kwargs):
+            raise MeasurementPending((), capacity_wait=True)
+
+        measurer.results = wait  # type: ignore[method-assign]
+    with pytest.raises(RunParked) as caught:
+        attempt_once(
+            CONFIG,
+            DEEP_CONTRACT,
+            tmp_path,
+            FakeHarness(result=ok_session()),
+            measurer,
+            "base",
+            _bare_snapshot(),
+            inbox_dir=directory,
+            ruler="r",
+            created="t",
+            changed_paths=lambda: ["src/pilot/solvers/tsp.py"],
+            launcher=launcher,
+        )
+    parked = caught.value
+    assert parked.afterany == ("" if waiting else "afterany:101:102")
+    assert parked.capacity_wait == waiting
+    assert parked.launches_used == 0
+    assert parked.syscall is not None and not parked.syscall.launches
+    assert any(
+        "REFUSED" in str(m.payload) and "operator GPU limit" in str(m.payload)
+        for m in pending(directory, 0)
+    )

@@ -181,6 +181,7 @@ class Compute(Protocol):
     def job_partition(self, job_id: str) -> str: ...
     def active_job_names(self) -> list[str]: ...
     def queue_snapshot(self) -> list[dict[str, str]]: ...
+    def gpu_jobs(self) -> list[tuple[str, int]]: ...
     def lane_load(self, partition: str) -> dict[str, int]: ...
     def job_id_for_name(self, name: str) -> str: ...
     def cancel(self, job_id: str) -> bool: ...
@@ -347,6 +348,19 @@ class SlurmCompute:
             raise SlurmQueryError(f"squeue failed ({result.returncode}): {result.stderr.strip()}")
         return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
+    def gpu_jobs(self) -> list[tuple[str, int]]:
+        """One snapshot includes array throttles even for individually requeued tasks."""
+        try:
+            result = self.runner(["squeue", "--me", "--json"], self.command_timeout_s)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise SlurmQueryError(f"squeue did not run: {exc}") from exc
+        if result.returncode:
+            raise SlurmQueryError(f"squeue failed ({result.returncode}): {result.stderr.strip()}")
+        try:
+            return parse_gpu_jobs(result.stdout)
+        except (ValueError, KeyError, TypeError) as exc:
+            raise SlurmQueryError(f"invalid squeue GPU snapshot: {exc}") from exc
+
     def queue_snapshot(self) -> list[dict[str, str]]:
         """This user's PENDING and RUNNING jobs as rows of QUEUE_FIELDS — what
         a queue view needs, nothing a caller acts on. Raises SlurmQueryError
@@ -461,6 +475,7 @@ class _LocalTasks:
     cancelled: threading.Event = field(default_factory=threading.Event)
     lock: threading.Lock = field(default_factory=threading.Lock)
     running: dict[str, subprocess.Popen[str]] = field(default_factory=dict)
+    on_done: Callable[[], None] = lambda: None
 
 
 @dataclass
@@ -699,7 +714,58 @@ class LocalCompute:
                     del pool["holders"][index]
             pool["queue"] = [w for w in pool["queue"] if w["id"] != job_id]
 
+    def gpu_jobs(self) -> list[tuple[str, int]]:
+        state_dir = _local_state_dir()
+        if state_dir is None:
+            return []
+        jobs = []
+        for path in state_dir.glob("*.active-gpu"):
+            try:
+                row = json.loads(path.read_text())
+            except FileNotFoundError:
+                continue  # completed during the snapshot
+            try:
+                os.kill(row["pid"], 0)
+            except ProcessLookupError:
+                continue
+            jobs.append((row["name"], row["gpus"]))
+        return jobs
+
     def submit(self, spec: JobSpec) -> str:
+        state_dir = _local_state_dir()
+        marker = None
+        remaining = len(array_indices(spec.array)) if spec.array else 1
+
+        def update() -> None:
+            with self._lock:
+                if marker is not None:
+                    demand = spec.gpus * min(remaining, array_throttle(spec.array) or remaining)
+                    tmp = marker.with_suffix(".tmp")
+                    tmp.write_text(
+                        json.dumps({"pid": os.getpid(), "name": spec.job_name, "gpus": demand})
+                    )
+                    os.replace(tmp, marker)
+
+        def completed() -> None:
+            nonlocal remaining
+            remaining -= 1
+            update()
+
+        if spec.gpus and state_dir is not None:
+            from uuid import uuid4
+
+            state_dir.mkdir(parents=True, exist_ok=True)
+            marker = state_dir / f"{os.getpid()}-{uuid4().hex}.active-gpu"
+            update()
+        try:
+            return self._submit(spec, completed)
+        finally:
+            with self._lock:
+                if marker is not None:
+                    marker.unlink(missing_ok=True)
+                    marker = None  # cancelled worker callbacks must not recreate it
+
+    def _submit(self, spec: JobSpec, completed: Callable[[], None]) -> str:
         if bool(spec.command) == bool(spec.script):
             # same contract SlurmCompute enforces via to_argv
             raise ValueError("exactly one of command/script must be set")
@@ -747,7 +813,7 @@ class LocalCompute:
             throttle = array_throttle(spec.array)
             if throttle is not None:
                 workers = min(workers, throttle)
-            tasks = _LocalTasks()
+            tasks = _LocalTasks(on_done=completed)
             executor = ThreadPoolExecutor(max_workers=workers)
             try:
                 futures = [
@@ -842,6 +908,7 @@ class LocalCompute:
                 self._release(job_id)
             with tasks.lock:
                 tasks.running.pop(job_id, None)
+                tasks.on_done()
 
     def _run_process(
         self,
@@ -901,10 +968,10 @@ class LocalCompute:
                 # is far younger than a day
                 cutoff = time.time() - 24 * 3600
                 for old in state_dir.iterdir():
-                    if (
-                        old.name in {"gpus.json", "gpus.lock", "gpus.tmp"}
-                        or old.suffix == ".announce"
-                    ):
+                    if old.name in {"gpus.json", "gpus.lock", "gpus.tmp"} or old.suffix in {
+                        ".announce",
+                        ".active-gpu",
+                    }:
                         continue
                     try:
                         if old.stat().st_mtime < cutoff:
@@ -1027,3 +1094,77 @@ def gpus_in_gres(gres: str) -> int:
 def quote_command(parts: Sequence[str]) -> str:
     """Shell-quote a command for JobSpec.command (--wrap takes a string)."""
     return " ".join(shlex.quote(p) for p in parts)
+
+
+def _slurm_number(value: object) -> int:
+    """Normalize legacy integers and Slurm's nullable numeric wrappers."""
+    if isinstance(value, dict):
+        value = value["number"] if value.get("set") and not value.get("infinite") else 0
+    return int(value) if isinstance(value, (int, str)) else 0
+
+
+def _tres_gpus(tres: str) -> int | None:
+    """GPU total, or None when absent; an untyped total includes typed entries."""
+    total = None
+    typed = None
+    for part in tres.split(","):
+        match = re.fullmatch(r"gres/gpu(?::([^:=,]+))?[:=](\d+)", part.strip())
+        if match:
+            count = int(match[2])
+            if match[1] is None:
+                total = (total or 0) + count
+            else:
+                typed = (typed or 0) + count
+    return total if total is not None else typed
+
+
+def parse_gpu_jobs(output: str) -> list[tuple[str, int]]:
+    """Count running tasks plus pending tasks up to each array's throttle.
+
+    Slurm JSON retains the throttle for individually instantiated/requeued tasks
+    and does not truncate array ranges. Per-node GPU requests scale by node count;
+    per-job requests and requested TRES already describe the whole job.
+    """
+    groups: dict[int, tuple[str, int, int, int, int]] = {}
+    snapshot = json.loads(output)
+    if snapshot.get("errors"):
+        raise SlurmQueryError(f"squeue errors: {snapshot['errors']}")
+    for job in snapshot["jobs"]:
+        state = job["job_state"]
+        states = [state] if isinstance(state, str) else state
+        # CONFIGURING and COMPLETING still reserve resources.
+        holding = any(s in {"RUNNING", "CONFIGURING", "COMPLETING"} for s in states)
+        if any(is_terminal(s) for s in states) or not (holding or "PENDING" in states):
+            continue
+        pending = not holding
+        gpus = _tres_gpus(job.get("tres_per_node") or "")
+        if gpus is not None:
+            gpus *= _slurm_number(job.get("node_count", 1)) or 1
+        else:
+            gpus = _tres_gpus(job.get("tres_per_job") or "")
+        if gpus is None:
+            gpus = _tres_gpus(job.get("tres_req_str") or "") or 0
+        if not gpus:
+            continue
+        parent = _slurm_number(job.get("array_job_id")) or _slurm_number(job["job_id"])
+        throttle = _slurm_number(job.get("array_max_tasks"))
+        if throttle >= 0xFFFFFFFE:
+            throttle = 0
+        count = 0
+        tasks = (job.get("array_task_string") or "0") if pending else "0"
+        for part in tasks.split("%", 1)[0].split(","):
+            span, _, stride = part.partition(":")
+            first, sep, last = span.partition("-")
+            count += (int(last) - int(first)) // int(stride or "1") + 1 if sep else 1
+        name, running, queued, old_throttle, old_gpus = groups.get(
+            parent, (job["name"], 0, 0, throttle, gpus)
+        )
+        if old_gpus != gpus or name != job["name"]:
+            raise SlurmQueryError("inconsistent GPU array rows")
+        running += 0 if pending else count
+        queued += count if pending else 0
+        groups[parent] = (name, running, queued, throttle or old_throttle, gpus)
+    return [
+        (name, gpus * (running + (min(queued, max(0, throttle - running)) if throttle else queued)))
+        for name, running, queued, throttle, gpus in groups.values()
+    ]

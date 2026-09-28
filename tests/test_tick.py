@@ -1997,6 +1997,8 @@ def test_panel_key_preflight_blocks_claim_and_launch(tmp_path: Path, monkeypatch
     from outerloop.intake import RELEASE_MARKER
 
     def failing_runner(argv, timeout_s):
+        if argv[0] == "sacct":
+            return CommandResult(0, "COMPLETED\n", "")
         return CommandResult(1, "", "sbatch: error")
 
     gh2 = IntakeGitHub()
@@ -2021,6 +2023,8 @@ def test_panel_key_preflight_blocks_claim_and_launch(tmp_path: Path, monkeypatch
     submitted2: list[str] = []
 
     def runner2(argv, timeout_s):
+        if argv[0] == "sacct":
+            return CommandResult(0, "COMPLETED\n", "")
         submitted2.append(" ".join(argv))
         return CommandResult(0, "77\n", "")
 
@@ -2038,6 +2042,7 @@ def test_panel_key_preflight_blocks_claim_and_launch(tmp_path: Path, monkeypatch
 
     clear_pending(tmp_path, "org/pilot")
     clear_pending(tmp_path, "org/pilot", "agent-01")
+    clear_pending(tmp_path, "org/pilot", "intake-5")
     out_low = service_self_initiated(
         tmp_path, SlurmCompute(runner=runner_low), low, contract, NOW + 4000
     )
@@ -2630,6 +2635,7 @@ roadmap: docs/roadmap.md
         tmp_path,
         RunRecord(
             run_id="w1",
+            run_job_id="101",
             target="org/pilot",
             task_title="t",
             state=ENDED,
