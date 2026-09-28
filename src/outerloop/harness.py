@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from outerloop.image import apptainer_from_env
+from outerloop.session_stream import EventSink, StartSink, communicate_events
 
 log = logging.getLogger(__name__)
 
@@ -75,9 +76,9 @@ class SessionResult:
     judge, bill, and report it. The workspace diff is captured by the caller
     (it owns the git clone); the harness owns only the session.
 
-    On the "timeout" path, cost and session id are unknown (the CLI is killed
-    before it reports); budget accounting must treat a timeout as worst-case
-    spend, not zero.
+    On the "timeout" path, cost is unknown; budget accounting must treat a
+    timeout as worst-case spend, not zero. Observed native authors retain an
+    identity emitted before the timeout.
     """
 
     stop_reason: str  # backend's stop reason, or "timeout" / "spawn-error"
@@ -572,6 +573,8 @@ class ClaudeCodeHarness:
     # Claude-on-Vertex (ADC) instead of the Anthropic API key; the api_key is
     # ignored when set. Contained sessions get the ADC file bind-mounted.
     vertex: VertexConfig | None = None
+    on_event: EventSink | None = field(default=None, repr=False)
+    on_start: StartSink | None = field(default=None, repr=False)
 
     CONTAINER_CLAUDE = "/opt/agent/claude"
     CONTAINER_ADC = "/opt/agent/adc.json"
@@ -609,7 +612,7 @@ class ClaudeCodeHarness:
             "--model",
             self.model,
             "--output-format",
-            "json",
+            "stream-json" if self.on_event is not None else "json",
             "--max-turns",
             str(self.max_turns),
             "--allowedTools",
@@ -617,6 +620,7 @@ class ClaudeCodeHarness:
             "--permission-mode",
             permission_mode,
             *(["--bare"] if self.bare else []),
+            *(["--verbose"] if self.on_event is not None else []),
             *self.extra_args,
         ]
         if resume_session_id:
@@ -699,30 +703,59 @@ class ClaudeCodeHarness:
             log.warning("could not spawn %s: %s", self.binary, exc)
             return _error_result("spawn-error", detail=f"could not spawn {self.binary}: {exc}")
 
-        try:
-            stdout, stderr = process.communicate(input=brief_text, timeout=self.timeout_s)
-        except subprocess.TimeoutExpired:
-            stdout = _kill_and_drain(process)
-            path = _write_private(
-                workspace.parent, transcript_stem, ".json", redact(stdout or "", (self.api_key,))
+        streamed = None
+        if self.on_event is not None:
+            streamed = communicate_events(
+                process,
+                brief_text,
+                self.timeout_s,
+                "claude-code",
+                self.api_key,
+                self.on_event,
+                self.on_start,
             )
-            log.warning("session timed out after %ss in %s", self.timeout_s, workspace)
-            return _error_result(
-                "timeout",
-                path,
-                detail=f"session hit its {self.timeout_s}s walltime and was killed",
-            )
+            stdout, stderr = streamed.stdout, streamed.stderr
+            if streamed.error:
+                path = _write_private(
+                    workspace.parent, transcript_stem, ".jsonl", redact(stdout, (self.api_key,))
+                )
+                return replace(
+                    _error_result(streamed.error, path, detail=streamed.detail),
+                    session_id=streamed.session_id,
+                    cost_usd=_float((streamed.result or {}).get("total_cost_usd")),
+                    num_turns=_int((streamed.result or {}).get("num_turns")),
+                )
+        else:
+            try:
+                stdout, stderr = process.communicate(input=brief_text, timeout=self.timeout_s)
+            except subprocess.TimeoutExpired:
+                stdout = _kill_and_drain(process)
+                path = _write_private(
+                    workspace.parent,
+                    transcript_stem,
+                    ".json",
+                    redact(stdout or "", (self.api_key,)),
+                )
+                log.warning("session timed out after %ss in %s", self.timeout_s, workspace)
+                return _error_result(
+                    "timeout",
+                    path,
+                    detail=f"session hit its {self.timeout_s}s walltime and was killed",
+                )
 
         stdout = redact(stdout, (self.api_key,))
         transcript_path = _write_private(workspace.parent, transcript_stem, ".json", stdout)
-        data = _parse_result(stdout)
+        data = streamed.result if streamed is not None else _parse_result(stdout)
         if data is None:
             stderr_tail = redact(stderr, (self.api_key,))[-500:]
             log.warning("unparseable session output (exit %s): %s", process.returncode, stderr_tail)
-            return _error_result("unparseable-output", transcript_path)
+            return replace(
+                _error_result("unparseable-output", transcript_path),
+                session_id=streamed.session_id if streamed else "",
+            )
         # Field-level salvage: a quirky cost value must not cost us the
         # session id (which resume depends on) or vice versa.
-        is_error = bool(data.get("is_error", process.returncode != 0))
+        is_error = process.returncode != 0 or bool(data.get("is_error", False))
         subtype = str(data.get("subtype") or "")
         errors = data.get("errors")
         # capture a real backend cause in ANY form — a list of messages, or a
@@ -962,6 +995,8 @@ class CodexHarness:
     # (the deployment's runner is the boundary)
     container_image: str = ""
     apptainer_binary: str = field(default_factory=apptainer_from_env)
+    on_event: EventSink | None = field(default=None, repr=False)
+    on_start: StartSink | None = field(default=None, repr=False)
     # in-container path the host codex binary is bound to (bind-from-host, like
     # ClaudeCodeHarness.CONTAINER_CLAUDE — the image stays codex-free, and codex
     # is updated by swapping one host binary, no rebuild). A bare class attribute
@@ -1141,22 +1176,49 @@ class CodexHarness:
             log.warning("could not spawn %s: %s", self.binary, exc)
             self._purge_auth(session_home)
             return _error_result("spawn-error", detail=f"could not spawn {self.binary}: {exc}")
-        try:
-            stdout, stderr = process.communicate(input=brief_text, timeout=self.timeout_s)
-        except subprocess.TimeoutExpired:
-            stdout = _kill_and_drain(process)
-            path = _write_private(
-                workspace.parent, transcript_stem, ".jsonl", redact(stdout or "", (self.api_key,))
+        streamed = None
+        if self.on_event is not None:
+            streamed = communicate_events(
+                process,
+                brief_text,
+                self.timeout_s,
+                "codex",
+                self.api_key,
+                self.on_event,
+                self.on_start,
             )
-            with contextlib.suppress(OSError):
-                last_message_path.unlink()  # clean up on the timeout path too
-            self._purge_auth(session_home)
-            log.warning("codex session timed out after %ss in %s", self.timeout_s, workspace)
-            return _error_result(
-                "timeout",
-                path,
-                detail=f"session hit its {self.timeout_s}s walltime and was killed",
-            )
+            stdout, stderr = streamed.stdout, streamed.stderr
+            if streamed.error:
+                path = _write_private(
+                    workspace.parent, transcript_stem, ".jsonl", redact(stdout, (self.api_key,))
+                )
+                with contextlib.suppress(OSError):
+                    last_message_path.unlink()
+                self._purge_auth(session_home)
+                return replace(
+                    _error_result(streamed.error, path, detail=streamed.detail),
+                    session_id=streamed.session_id,
+                )
+        else:
+            try:
+                stdout, stderr = process.communicate(input=brief_text, timeout=self.timeout_s)
+            except subprocess.TimeoutExpired:
+                stdout = _kill_and_drain(process)
+                path = _write_private(
+                    workspace.parent,
+                    transcript_stem,
+                    ".jsonl",
+                    redact(stdout or "", (self.api_key,)),
+                )
+                with contextlib.suppress(OSError):
+                    last_message_path.unlink()  # clean up on the timeout path too
+                self._purge_auth(session_home)
+                log.warning("codex session timed out after %ss in %s", self.timeout_s, workspace)
+                return _error_result(
+                    "timeout",
+                    path,
+                    detail=f"session hit its {self.timeout_s}s walltime and was killed",
+                )
         stdout = redact(stdout, (self.api_key,))
         transcript_path = _write_private(workspace.parent, transcript_stem, ".jsonl", stdout)
         last_message = ""
@@ -1169,13 +1231,21 @@ class CodexHarness:
         with contextlib.suppress(OSError):
             last_message_path.unlink()
         self._purge_auth(session_home)
-        return _parse_codex_result(
+        parsed = _parse_codex_result(
             stdout,
             last_message,
             process.returncode,
             transcript_path,
             stderr=redact(stderr, (self.api_key,)),
         )
+        if streamed is not None and (not streamed.session_id or not streamed.completed):
+            return replace(
+                parsed,
+                is_error=True,
+                stop_reason="incomplete-output",
+                error_detail=parsed.error_detail or "missing native identity or completion",
+            )
+        return parsed
 
 
 def _hermes_command(

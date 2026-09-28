@@ -24,6 +24,8 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import TextIO, cast
 
+from outerloop.session_control import projected_session_id
+
 log = logging.getLogger(__name__)
 
 # Lifecycle states.
@@ -255,7 +257,12 @@ def _save_record(root: Path, record: RunRecord, now: float) -> None:
         raise ValueError("waiting run with an experiment needs a deadline")
     directory = run_dir(root, record.run_id)
     directory.mkdir(parents=True, exist_ok=True)
-    stamped = replace(record, updated=now, created=record.created or now)
+    stamped = replace(
+        record,
+        updated=now,
+        created=record.created or now,
+        resume_session_id=projected_session_id(directory, record.resume_session_id),
+    )
     # unique tmp name: two concurrent writers must not interleave into the
     # same tmp file before the atomic replace
     tmp = directory / f".{RECORD_NAME}.{os.getpid()}.tmp"
@@ -291,7 +298,10 @@ def load_record(root: Path, run_id: str) -> RunRecord:
     # Unknown fields must not blind an older kernel to a live run.
     known = {k: v for k, v in raw.items() if k in RunRecord.__dataclass_fields__}
     record = RunRecord(**known)
-    return record
+    return replace(
+        record,
+        resume_session_id=projected_session_id(run_dir(root, run_id), record.resume_session_id),
+    )
 
 
 def migrate_inbox(root: Path, run_id: str, now: float) -> None:

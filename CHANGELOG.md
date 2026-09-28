@@ -6,6 +6,17 @@ Versions follow [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+### Added
+
+- Native Codex and Claude Code authors publish redacted live events and preserve
+  their session identity across failed turns. A durable generation and process
+  group record refuses overlapping author writers after controller restart.
+- Upgrading: legacy run records need no backfill. The first controlled author
+  turn creates `session-control/` beside the workspace; retain it with the native
+  home when moving a run. Drain authors before upgrading or downgrading. Older
+  kernels do not enforce this sidecar's writer ownership. See
+  [author session control](docs/design/session-control.md) for recovery limits.
+
 ## [0.2.1] - 2026-09-25
 
 ### Upgrading
