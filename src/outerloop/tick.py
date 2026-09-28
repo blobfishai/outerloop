@@ -46,6 +46,11 @@ from outerloop.housekeeping import shed_ended_workspaces
 from outerloop.ledger_branch import RESEARCH_LOG_BRANCH as RESEARCH_LOG_BRANCH
 from outerloop.limits import EffectiveLimits, effective_limits
 from outerloop.markers import has_marker, marker
+from outerloop.operator_limits import (
+    attempt_width,
+    read_limits,
+    submit,
+)
 from outerloop.runstate import (
     ABORTED,
     ENDED,
@@ -1826,6 +1831,7 @@ def tick(
     # coalesce guard reads the last COMPLETED tick's marker (not the heartbeat).
     prior_worked = _last_worked_ts(root)
     write_heartbeat(root, now)
+    read_limits(root)
     legacy = 0
     for path in (root / "runs").glob("*/state.json"):
         try:
@@ -1998,7 +2004,15 @@ def tick(
             log.warning("research-log service failed: %s", exc)
         intake_job = (
             service_intake(
-                root, github, compute, spec, now, contract, limits, dry_run=service_dry_run
+                root,
+                github,
+                compute,
+                spec,
+                now,
+                contract,
+                limits,
+                dry_run=service_dry_run,
+                records=tick_records,
             )
             if launch_ok and contract is not None
             else None
@@ -2609,7 +2623,7 @@ def service_self_initiated(
     try:
         if records is None:
             records = list_runs(root)
-        width = _attempt_width(contract)
+        width = attempt_width(root, spec.target, _attempt_width(contract))
         # WIDTH: every live pending marker occupies a slot; landed ones
         # clear; dead ones become per-benchmark tombstones and free theirs.
         occupied: set[str] = set()
@@ -2730,7 +2744,10 @@ def service_self_initiated(
         # config-driven author: climb resolves the author backend/model/key from
         # OUTERLOOP_AUTHOR_* env (inherited by the job), so the tick threads
         # neither the backend nor its key — a new backend needs zero tick change.
-        job_id = compute.submit(
+        job_id = submit(
+            root,
+            spec.target,
+            compute,
             JobSpec(
                 job_name=f"climb-{benchmark}-{slot_agent}"[:60],
                 account=spec.account,
@@ -2742,7 +2759,7 @@ def service_self_initiated(
                 ),
                 cpus=4,
                 mem="8G",
-            )
+            ),
         )
         write_pending(root, spec.target, benchmark, job_id, now, agent=slot_agent)
         log.info("self-initiated climb on %s: job %s", benchmark, job_id)
@@ -2771,6 +2788,8 @@ def service_steward(
 
     target = spec.target
     if not target or not spec.steward_key_file:
+        return None
+    if attempt_width(root, target, _attempt_width(contract)) == 0:
         return None
     if getattr(contract, "steward", None) is None:
         return None
@@ -2867,7 +2886,10 @@ def service_steward(
         if spec.pat_file:
             argv += ["--pat-file", spec.pat_file]
         try:
-            job_id = compute.submit(
+            job_id = submit(
+                root,
+                target,
+                compute,
                 JobSpec(
                     job_name=f"steward-issue-{task.number}",
                     account=spec.account,
@@ -2877,7 +2899,7 @@ def service_steward(
                     command=_flight_command(spec.home, f"steward-issue-{task.number}", now, argv),
                     cpus=4,
                     mem="8G",
-                )
+                ),
             )
         except Exception:
             # release the claim: a claim with no job behind it would orphan
@@ -2909,6 +2931,7 @@ def service_intake(
     contract: Any = None,
     limits: EffectiveLimits | None = None,
     dry_run: bool = False,
+    records: list[RunRecord] | None = None,
 ) -> tuple[str, str] | None:
     """The requested lane: claim at most ONE qualifying issue per tick and
     submit a climb job for it. The claim comment (posted by the climb job
@@ -2931,6 +2954,11 @@ def service_intake(
             if contract_raw is None:
                 return None
             contract = load_contract(contract_raw, target)
+        operator_width = read_limits(root).value(target, "max_active_attempts")
+        if operator_width is not None:
+            active_attempts = sum(r.target == target and r.state != ENDED for r in (records or []))
+            if active_attempts >= min(operator_width, _attempt_width(contract)):
+                return None
         limits = limits if limits is not None else effective_limits(contract.budgets)
         task = pick_issue(github, target, contract, spec.bot_login)
         if task is None:
@@ -3006,7 +3034,10 @@ def service_intake(
         # config-driven author: climb resolves the author key from the
         # OUTERLOOP_AUTHOR_* env by backend; the tick does not thread it.
         try:
-            job_id = compute.submit(
+            job_id = submit(
+                root,
+                target,
+                compute,
                 JobSpec(
                     job_name=f"climb-issue-{task.number}",
                     account=spec.account,
@@ -3016,7 +3047,7 @@ def service_intake(
                     command=_flight_command(spec.home, f"climb-issue-{task.number}", now, argv),
                     cpus=4,
                     mem="8G",
-                )
+                ),
             )
         except Exception:
             # the claim is already posted and pick_issue skips claimed
@@ -3118,9 +3149,12 @@ class JobWakeDispatcher:
         # config-driven author: `climb --resume` resolves the author key from the
         # PARKED RUN's backend (persisted on its record) inside climb.main — the
         # tick does not thread the key, so a fleet flip picks the right one.
-        name = f"wake-{record.run_id}"[:60]
+        name = f"wake-{record.run_id}"
         afterany = str(record.stage.get("afterany", ""))
-        return self.compute.submit(
+        return submit(
+            self.spec.run_root,
+            record.target,
+            self.compute,
             JobSpec(
                 job_name=name,
                 account=self.spec.account,
@@ -3131,7 +3165,7 @@ class JobWakeDispatcher:
                 dependency=afterany,
                 cpus=2,
                 mem="4G",
-            )
+            ),
         )
 
 

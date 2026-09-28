@@ -834,6 +834,8 @@ def main(argv: list[str] | None = None) -> int:
         from outerloop import init
 
         return init.main(argv[1:])
+    p = sub.add_parser("limits", help="show live operator ceilings and fleet GPU usage")
+    p.add_argument("--root", help="state root (defaults to OUTERLOOP_ROOT or ~/.outerloop)")
     p = sub.add_parser("permissions", help="check and update the App's required permissions")
     p.add_argument("--open", action="store_true", help="open the next permission settings page")
     p = sub.add_parser("migrate-ledger", help="seed research-log from a pinned main ledger")
@@ -846,6 +848,23 @@ def main(argv: list[str] | None = None) -> int:
         from outerloop.ledger_migrate import migrate
 
         return migrate(args)
+    if args.command == "limits":
+        from outerloop.compute import compute_from_env
+        from outerloop.operator_limits import CapacityError, report
+
+        values = env_file_values(keys=None)
+        root = Path(
+            args.root
+            or os.environ.get("OUTERLOOP_ROOT")
+            or values.get("OUTERLOOP_ROOT")
+            or DEFAULT_LOCAL_ROOT
+        ).expanduser()
+        try:
+            print(report(root, compute_from_env()))
+        except CapacityError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        return 0
     if args.command == "permissions":
         return permissions(args)
     if args.command == "upgrade":

@@ -6,6 +6,19 @@ Versions follow [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+### Fixed
+
+- GPU accounting accepts Slurm 25.05 wrapped numeric fields and legacy integers, recognizes typed GPU requests and per-node counts, and limits pending array remainders to available throttle slots.
+
+### Added
+
+- Live, tighten-only `<root>/limits.toml` GPU and active-attempt ceilings, with global defaults and per-target sections. Scheduler-reported GPU usage covers pending and running experiments, sweeps, evaluations, and GPU-bearing sessions. Authors receive uncharged launch refusals; evaluations wait for capacity. Lowering a ceiling does not cancel jobs.
+- Read-only `outerloop limits` reports operator ceilings and fleet-owned running/pending GPU usage.
+
+### Upgrading
+
+- Upgrading: the optional `stage.capacity_wait` flag tolerates missing fields; existing state records need only their target for scheduler attribution. No contract schema change or admission journal. Drain older jobs whose names omit the full run ID (and older local jobs without scheduler metadata), and upgrade all submitters before relying on ceilings. Concurrent admissions may overshoot by one batch for two simultaneous checks; no cross-node admission lock.
+
 ## [0.2.1] - 2026-09-25
 
 ### Upgrading
