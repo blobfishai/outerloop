@@ -61,6 +61,19 @@ def communicate_events(
     deadline = time.monotonic() + timeout_s
     drain_deadline: float | None = None
 
+    def terminate_group() -> None:
+        # macOS can return EPERM for a group whose only member is our exited,
+        # unreaped child. Reap it before deciding group cleanup failed.
+        process.poll()
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except PermissionError:
+            process.poll()
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
     def scrub(value: Any) -> Any:
         if isinstance(value, str):
             return value.replace(secret, "[REDACTED]") if secret else value
@@ -120,8 +133,7 @@ def communicate_events(
             while selector.get_map() or process.poll() is None:
                 if process.poll() is not None:
                     if drain_deadline is None:
-                        with contextlib.suppress(ProcessLookupError):
-                            os.killpg(process.pid, signal.SIGKILL)
+                        terminate_group()
                         drain_deadline = time.monotonic() + 0.25
                     if time.monotonic() >= drain_deadline:
                         break  # An escaped descendant may still hold a pipe.
@@ -176,9 +188,7 @@ def communicate_events(
     finally:
         # Local tool descendants must not outlive a completed author either.
         try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+            terminate_group()
         except OSError:
             result.error = "cleanup-error"
             result.detail = "could not terminate author process group"
