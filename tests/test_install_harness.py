@@ -77,7 +77,7 @@ def test_claude_checksum_gate(tmp_path, valid):
     source = (ROOT / "scripts/install_claude.sh").read_text()
     script.write_text(
         re.sub(
-            r'WANT_SHA256="[0-9a-f]{64}"',
+            r'WANT_SHA256="\$\(pin claude [a-z0-9-]+\)"',
             f'WANT_SHA256="{hashlib.sha256(payload).hexdigest()}"',
             source,
         )
@@ -106,100 +106,6 @@ def test_claude_checksum_gate(tmp_path, valid):
         assert subprocess.run(["bash", str(script), str(target)], env=env).returncode == 0
     else:
         assert "sha256 mismatch" in result.stderr
-
-
-def _claude_provisioning_block(deploy: str) -> str:
-    start = deploy.index("# The configured author's CLI is a host prerequisite")
-    end = deploy.index("\nesac\n", start) + len("\nesac\n")  # the outer case, at column 0
-    return deploy[start:end]
-
-
-@pytest.mark.parametrize(
-    ("author", "present", "on_path", "recorded", "relative_path", "expected"),
-    [
-        (
-            "claude",
-            False,
-            False,
-            "",
-            False,
-            "default",
-        ),  # missing everywhere: install to ~/.local/bin
-        ("claude", True, False, "", False, ""),  # already under ~/.local/bin
-        ("claude", False, True, "", False, ""),  # already on PATH (absolute entry)
-        (
-            "claude",
-            False,
-            True,
-            "",
-            True,
-            "default",
-        ),  # only through a relative PATH entry: jobs cannot use it
-        (
-            "claude",
-            False,
-            True,
-            "stale",
-            False,
-            "recorded",
-        ),  # recorded path gone: PATH does not excuse it
-        ("claude", True, False, "present", False, ""),  # recorded path present
-        ("codex", False, False, "", False, ""),  # not the configured author
-    ],
-)
-def test_deploy_provisions_the_configured_author_cli(
-    tmp_path, author, present, on_path, recorded, relative_path, expected
-):
-    """The chain's deploy step runs the pinned claude installer only when the
-    configured author is claude and the CLI the jobs will use is missing: the
-    recorded path when there is one, else an absolute PATH hit or ~/.local/bin."""
-    home = tmp_path / "checkout"
-    (home / "scripts").mkdir(parents=True)
-    log = tmp_path / "calls"
-    (home / "scripts" / "install_claude.sh").write_text(f'#!/bin/bash\necho "claude $1" >> {log}\n')
-    userhome = tmp_path / "userhome"
-    (userhome / ".local" / "bin").mkdir(parents=True)
-    path_dir = tmp_path / "path"
-    path_dir.mkdir()
-    if present:
-        binary = userhome / ".local" / "bin" / "claude"
-        binary.write_text("#!/bin/sh\n")
-        binary.chmod(0o755)
-    if on_path:
-        binary = path_dir / "claude"
-        binary.write_text("#!/bin/sh\n")
-        binary.chmod(0o755)
-    env = {
-        "HOME": str(userhome),
-        "OUTERLOOP_HOME": str(home),
-        "OUTERLOOP_AUTHOR_BACKEND": author,
-        "PATH": f"{path_dir}:/usr/bin:/bin",
-    }
-    recorded_path = tmp_path / "recorded" / "claude"
-    if recorded == "present":
-        recorded_path.parent.mkdir()
-        recorded_path.write_text("#!/bin/sh\n")
-        recorded_path.chmod(0o755)
-    if recorded:
-        env["OUTERLOOP_CLAUDE_BIN"] = str(recorded_path)
-    if relative_path:
-        env["PATH"] = ".:/usr/bin:/bin"
-    block = _claude_provisioning_block((ROOT / "scripts/tick_deploy.sh").read_text())
-    subprocess.run(
-        ["/bin/bash", "-c", block],
-        env=env,
-        check=True,
-        capture_output=True,
-        text=True,
-        cwd=path_dir,
-    )
-    calls = log.read_text().splitlines() if log.exists() else []
-    want = {
-        "": [],
-        "default": [f"claude {userhome / '.local' / 'bin' / 'claude'}"],
-        "recorded": [f"claude {recorded_path}"],
-    }[expected]
-    assert calls == want
 
 
 @pytest.mark.parametrize(
@@ -274,8 +180,6 @@ def test_init_installs_hermes_judges(tmp_path, monkeypatch, setting, mode):
 
 
 def test_hermes_source_only_upgrade_retry_and_reuse(tmp_path):
-    from outerloop.hermes_install import HERMES_SHA
-
     # Legacy installer output: a clean pinned checkout without any runtime.
     repo = tmp_path / "hermes"
     repo.mkdir()
@@ -288,9 +192,9 @@ def test_hermes_source_only_upgrade_retry_and_reuse(tmp_path):
         subprocess.run(["git", "-C", str(repo), *args], check=True)
     sha = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
     source = (ROOT / "scripts/install_hermes.sh").read_text()
-    assert f'WANT_SHA="{HERMES_SHA}"' in source
+    assert 'WANT_SHA="$(pin hermes sha)"' in source
     script = tmp_path / "installer.sh"
-    script.write_text(source.replace(HERMES_SHA, sha))
+    script.write_text(source.replace('WANT_SHA="$(pin hermes sha)"', f'WANT_SHA="{sha}"'))
     shim = tmp_path / "bin"
     shim.mkdir()
     uv = shim / "uv"
@@ -341,6 +245,12 @@ esac
     prior = calls.read_text()
     assert subprocess.run(["bash", str(script), str(repo)], env=env).returncode == 0
     assert calls.read_text() == prior
+    # A matching completion SHA cannot bless a modified interpreter.
+    python = runtime / "venv/bin/python"
+    python.write_text("#!/bin/sh\nexit 19\n")
+    assert subprocess.run(["bash", str(script), str(repo)], env=env).returncode == 0
+    assert calls.read_text() != prior
+    assert python.read_text() == "#!/bin/sh\nexit 0\n"
 
 
 @pytest.mark.parametrize("source_exists", [False, True])
@@ -411,8 +321,6 @@ def test_full_init_preserves_review_settings(tmp_path, monkeypatch, override):
 def test_workflow_hermes_installers(tmp_path):
     import yaml
 
-    from outerloop.hermes_install import HERMES_SHA
-
     count = 0
     for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
         workflow = yaml.safe_load(path.read_text())
@@ -434,8 +342,6 @@ def test_workflow_hermes_installers(tmp_path):
                 installer.parent.mkdir(parents=True, exist_ok=True)
                 installer.write_text(
                     'test "$1" = "$GITHUB_WORKSPACE/hermes-agent"\n'
-                    f'test "$HERMES_SHA" = "{HERMES_SHA}"\n'
-                    'test "$HERMES_REF" = "v2026.8.13"\n'
                     'touch "$GITHUB_WORKSPACE/called"\n'
                 )
                 called = tmp_path / "called"
@@ -524,3 +430,59 @@ def test_hermes_workflow_pin_drift_refused(tmp_path):
     assert result.returncode == 1
     assert "pins disagree" in result.stderr
     assert not repo.exists()
+
+
+@pytest.mark.parametrize("name", ["claude", "codex"])
+@pytest.mark.parametrize("marker", ["legacy", "stale"])
+def test_tampered_binary_reinstalled(tmp_path, name, marker):
+    import tarfile
+
+    from outerloop import harness_cli
+    from outerloop.harness_pins import pins
+
+    version = pins(name)["version"]
+    payload = f"#!/bin/sh\necho '{version}'\n"
+    binary = tmp_path / name
+    binary.write_text(payload)
+    asset = tmp_path / "asset"
+    if name == "codex":
+        with tarfile.open(asset, "w:gz") as archive:
+            archive.add(binary, arcname="codex")
+    else:
+        asset.write_text(payload)
+    checksum = hashlib.sha256(asset.read_bytes()).hexdigest()
+    digest = hashlib.sha256(payload.encode()).hexdigest()
+    source = (ROOT / f"scripts/install_{name}.sh").read_text()
+    source = re.sub(
+        rf'WANT_SHA256="\$\(pin {name} [a-z0-9-]+\)"',
+        f'WANT_SHA256="{checksum}"',
+        source,
+    )
+    script = tmp_path / "installer.sh"
+    script.write_text(source)
+    binary.write_text(payload + "# tampered\n")
+    binary.chmod(0o755)
+    sidecar = Path(f"{binary}.verified-sha256")
+    sidecar.write_text(checksum if marker == "legacy" else f"{checksum} {digest}")
+    desired = {"version": version, "sha256": checksum}
+    assert not harness_cli.verified(name, binary, desired)
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    for command, body in {
+        "curl": '#!/bin/sh\nwhile [ "$1" != -o ]; do shift; done\ncp "$ASSET" "$2"\n',
+        "uname": '#!/bin/sh\ncase "$1" in -s) echo Linux;; -m) echo x86_64;; esac\n',
+    }.items():
+        executable = shim / command
+        executable.write_text(body)
+        executable.chmod(0o755)
+    env = {**os.environ, "PATH": f"{shim}:{os.environ['PATH']}", "ASSET": str(asset)}
+    argv = ["bash", str(script), str(binary)]
+    result = subprocess.run(argv, env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert binary.read_text() == payload
+    assert harness_cli.verified(name, binary, desired)
+    if name == "codex":
+        assert sidecar.read_text().strip() == f"{checksum} {digest}"
+        assert checksum != digest
+    (shim / "curl").write_text("#!/bin/sh\nexit 99\n")
+    assert subprocess.run(argv, env=env).returncode == 0

@@ -12,17 +12,21 @@
 #               else ~/hermes-agent)
 set -euo pipefail
 
-# Pinned tag AND its COMMIT sha: the tag names the version for humans, the
-# sha is the integrity pin (tags are mutable; a moved tag must fail loudly,
-# never run with the panel key). Bump both together, in lockstep with the
-# GH review workflows' HERMES_REF. NOTE: v-tags here are ANNOTATED — plain
-# `git ls-remote` shows the TAG OBJECT's sha; pin the dereferenced `^{}`
-# line (the commit), which is what `rev-parse HEAD` yields after checkout.
-WANT="v2026.8.13"
-WANT_SHA="f80f453ae0679347e38abc917c7f94f717bf96c5"
+# A checkout needs no installed kernel; wheels use the same packaged reader.
+pin() {
+    local reader
+    reader="$(dirname "${BASH_SOURCE[0]}")/../src/outerloop/harness_pins.py"
+    if [ -f "$reader" ]; then
+        python3 "$reader" "$@"
+    else
+        python3 -m outerloop.harness_pins "$@"
+    fi
+}
+WANT="$(pin hermes ref)"
+WANT_SHA="$(pin hermes sha)"
 TARGET="${1:-${REVIEW_HERMES_REPO:-$HOME/hermes-agent}}"
 
-# Workflows pass their pins too: refuse drift before touching either artifact.
+# Reject conflicting pins supplied by legacy callers.
 if [ "${HERMES_REF:-$WANT}" != "$WANT" ] || [ "${HERMES_SHA:-$WANT_SHA}" != "$WANT_SHA" ]; then
     echo "hermes-agent: workflow and installer pins disagree — refusing" >&2
     exit 1
@@ -76,12 +80,16 @@ if [ "$head" != "$WANT_SHA" ]; then
 fi
 RUNTIME="${TARGET}.runtime/$WANT_SHA"
 if [ -f "$RUNTIME/.complete" ] && [ "$(cat "$RUNTIME/.complete")" = "$WANT_SHA" ] && \
-   [ -x "$RUNTIME/venv/bin/python" ]; then
+   [ -x "$RUNTIME/venv/bin/python" ] && \
+   [ "$(cat "$RUNTIME/venv/bin/python.verified-sha256" 2>/dev/null || true)" = \
+     "$(sha256sum "$RUNTIME/venv/bin/python" | cut -d' ' -f1)" ]; then
     echo "hermes-agent $WANT ($WANT_SHA) ready at $TARGET"
     exit 0
 fi
 mkdir -p "$RUNTIME"
 rm -f "$RUNTIME/.complete"
+# Rebuild both the interpreter and venv after an interrupted or changed install.
+rm -rf "$RUNTIME/python" "$RUNTIME/venv"
 export UV_PYTHON_INSTALL_DIR="$RUNTIME/python"
 export UV_PROJECT_ENVIRONMENT="$RUNTIME/venv"
 export UV_CACHE_DIR="$RUNTIME/cache"
@@ -96,5 +104,6 @@ esac
 uv sync --project "$TARGET" --frozen --no-install-project --python "$python"
 "$RUNTIME/venv/bin/python" -B -c 'import sys; assert sys.version_info >= (3, 12)'
 rm -rf "$UV_CACHE_DIR"  # the venv is complete; sessions never need the download cache
+sha256sum "$RUNTIME/venv/bin/python" | cut -d' ' -f1 > "$RUNTIME/venv/bin/python.verified-sha256"
 printf '%s\n' "$WANT_SHA" > "$RUNTIME/.complete"
 echo "hermes-agent $WANT ($WANT_SHA) ready at $TARGET"

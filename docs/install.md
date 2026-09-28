@@ -771,3 +771,60 @@ Update the fleet by commit. Before deploying this stage, check every fleet's
 `legacy follow-up records: N` tick line and require zero. Old records migrate
 on read; an older kernel cannot read the new state names. The incompatibility
 is confined to the state field, so rollbacks need state translation.
+
+
+## Harness pins and upgrades
+
+`src/outerloop/harnesses.toml` ships in the wheel and owns harness versions and
+integrity pins. Installers and CI read it through `outerloop.harness_pins`.
+Bump the version and its checksums together; Hermes needs both its tag and the
+full dereferenced commit SHA.
+
+Run `outerloop harness status` to inspect all three harnesses without installing
+anything. It reports the kernel pin, installed version (Hermes source SHA and
+runtime `.complete`), path, `DRIFT`, and any `override`. Drift compares against
+the effective operator override when one is present.
+
+`outerloop harness upgrade [claude codex hermes]` defaults to all three.
+`--used` selects the author, configured review/panel backends, and the Claude
+steward when configured. The deployment runs this after a successful kernel
+sync; a failure is logged without preventing the tick.
+
+Each changed harness is built below `<state-root>/harnesses/<name>/<version>/`
+in its final location. Verification precedes an atomic replacement of the
+operator `.env`, recording `OUTERLOOP_CLAUDE_BIN`, `OUTERLOOP_CODEX_BIN`, or
+`REVIEW_HERMES_REPO`. Old installations remain available; failed candidates
+are deleted and never become active. Each harness has a 300-second deadline
+(configurable with exported `OUTERLOOP_HARNESS_TIMEOUT_SECONDS`); timeout kills
+the installer process group and retains the old path. Failures back off from
+five minutes to one day per desired pin, recorded under
+`<cache-root>/harness-failures/`. Concurrent upgrades are refused. Repeating a completed
+upgrade does no installation work. Shell settings take precedence over `.env`;
+clear an explicitly exported binary path to use the path recorded by upgrade.
+
+For a trial release, set `OUTERLOOP_CLAUDE_VERSION` or
+`OUTERLOOP_CODEX_VERSION` in `~/.config/outerloop/.env`, then upgrade that harness.
+Each version override requires its matching `OUTERLOOP_CLAUDE_SHA256` or
+`OUTERLOOP_CODEX_SHA256`: the SHA-256 of the platform native executable.
+Codex trials require npm; its cache uses `<cache-root>/npm`, preserving an
+explicit `npm_config_cache`. Missing hashes are refused by status and upgrade. Hermes trials
+require both `OUTERLOOP_HERMES_REF` and `OUTERLOOP_HERMES_SHA`; tag-to-commit
+verification remains mandatory. Remove the override and upgrade to return to
+the kernel pin. The existing installers' platform restrictions still apply.
+
+Compatibility: legacy direct binary paths and source-only Hermes checkouts are
+accepted as inputs; missing runtimes are reported as drift and provisioned in a
+new location. Legacy Codex binaries without a verified hash marker are
+reinstalled in a new location; older kernels ignore the new marker and retry
+state files. The `.env` assignment format and Hermes `<source>.runtime/<sha>`
+layout are unchanged. Running jobs keep their original paths and artifacts;
+run records, PRs, and parked work need no migration. New kernels select a Hermes
+runtime using its installed source SHA, so a failed update keeps the previous
+runtime usable. When rolling back to an older kernel with a different Hermes
+pin, restore its previous `REVIEW_HERMES_REPO` path as well: older kernels select
+runtimes by their own pin. Retained old paths can also be restored manually for
+Claude and Codex. Disable automatic kernel updates while holding a rollback.
+
+`OUTERLOOP_CACHE_ROOT` directs fleet caches away from home (default:
+`<state-root>/cache`). Explicit `XDG_CACHE_HOME`, `WANDB_DIR`, `WANDB_CACHE_DIR`,
+`UV_CACHE_DIR`, and `APPTAINER_CACHEDIR` values take precedence.
