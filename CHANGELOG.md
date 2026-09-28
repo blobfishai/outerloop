@@ -6,6 +6,24 @@ Versions follow [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+### Fixed
+
+- Manual harness upgrades honor `--root`, environment, and `.env` state roots. Retry records are replaced atomically; unreadable or invalid records are logged and ignored. Deploy loads the configured cache root before selecting the uv cache.
+- Harness installers reinstall changed binaries rather than refusing repair; Codex checks its installed binary digest separately from the archive pin, and Hermes runtime reuse checks the interpreter digest.
+
+- Harness upgrades enforce a per-harness deadline, kill timed-out installer process groups, restrict installer environments, and back off failed pins while deleting failed candidates. Overrides require explicit integrity hashes; installed binaries are hash-checked before reuse. Workflow pin resolution fails explicitly on older reviewer refs without a pins reader.
+
+- Tick entrypoints export a state-root uv cache before running Python. Fleet job environments preserve explicit cache paths and default per-user caches below `OUTERLOOP_CACHE_ROOT` (or the state root).
+
+- Run-owned launch, evaluation, and wake job names stay within 128 characters, retaining a stable run key when shortened. Normal names stay unchanged; GPU usage, queue attribution, evaluation deduplication, and flight retention recognize the bounded names.
+- Intake admission counts queued attempts using the existing pending markers, including jobs queued beyond the marker TTL.
+
+- GPU accounting accepts Slurm 25.05 wrapped numeric fields and legacy integers, recognizes typed GPU requests and per-node counts, and limits pending array remainders to available throttle slots.
+- CI Hermes provisioning uses the shared runtime installer with anonymous clone retries and matching workflow pins. A source-specific lock protects checkout and runtime mutations; Python discovery excludes active virtualenvs.
+- Panel preflight checks Hermes runtime readiness and explains installation; full init preserves review model and provider settings with environment precedence.
+
+- Contained Hermes sessions can start with read-only source; sessions no longer reinstall dependencies or attempt an editable project build.
+
 ### Added
 
 - Native Codex and Claude Code authors publish redacted live events and preserve
@@ -16,6 +34,26 @@ Versions follow [SemVer](https://semver.org).
   home when moving a run. Drain authors before upgrading or downgrading. Older
   kernels do not enforce this sidecar's writer ownership. See
   [author session control](docs/design/session-control.md) for recovery limits.
+
+- Packaged `harnesses.toml` owns Claude, Codex, and Hermes pins. `outerloop harness status` reports installed versions, paths, drift, and operator overrides; `harness upgrade [name...]` verifies versioned installations before atomically recording their paths. Successful kernel deploys upgrade only configured backends; failures retain the previous installation.
+
+- Live, tighten-only `<root>/limits.toml` GPU and active-attempt ceilings, with global defaults and per-target sections. Scheduler-reported GPU usage covers pending and running experiments, sweeps, evaluations, and GPU-bearing sessions. Authors receive uncharged launch refusals; evaluations wait for capacity. Lowering a ceiling does not cancel jobs.
+- Read-only `outerloop limits` reports operator ceilings and fleet-owned running/pending GPU usage.
+
+### Changed
+
+- Upgrading: legacy Codex archive-only markers and Hermes runtimes without interpreter digests are reinstalled on upgrade; legacy Hermes runtimes remain launchable. Existing retry records remain readable, and corrupt records are treated as empty. Run state and in-flight PRs are unchanged; rollback leaves the additional digest files unused.
+
+- Upgrading: version overrides now require matching SHA-256 settings; legacy Codex installs without hash markers are reprovisioned. New retry state and hash markers are ignored by older kernels; the first successfully synced tick verifies configured harnesses and records new paths only when needed. Legacy `.env` paths and Hermes runtimes remain readable; old artifacts are retained. See `docs/install.md` for rollback across kernel pins.
+
+- Hermes installs a standalone Python and venv once per pinned commit in a sibling runtime, then launches Python directly. Full `init` provisions configured Hermes judges and records their source path; `--no-install-harness` opts out.
+
+### Upgrading
+
+- Upgrading: full run-ID names and legacy 60-character queue names remain readable; shortened names use a derived run key without changing run records. Intake adds `@intake-<issue>` files in the existing pending directory; legacy unsuffixed and agent-slot markers remain readable. Drain queued intake jobs from older submitters (which wrote no marker) before relying on attempt ceilings. Upgrade all kernels together; older kernels do not recognize shortened names or intake markers, so drain those jobs before rollback.
+
+- Upgrading: the optional `stage.capacity_wait` flag tolerates missing fields; existing state records need only their target for scheduler attribution. No contract schema change or admission journal. Drain older jobs whose names omit the full run ID (and older local jobs without scheduler metadata), and upgrade all submitters before relying on ceilings. Concurrent admissions may overshoot by one batch for two simultaneous checks; no cross-node admission lock.
+- Upgrading: existing Hermes source-only installs require `bash scripts/install_hermes.sh "$REVIEW_HERMES_REPO"` (or full `outerloop init --force` with Hermes configured) to create the persisted runtime. Run records and resume transcripts are unchanged; rollback leaves the sibling runtime unused.
 
 ## [0.2.1] - 2026-09-25
 
