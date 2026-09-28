@@ -8,6 +8,8 @@ Versions follow [SemVer](https://semver.org).
 
 ### Fixed
 
+- The `research-log` ledger works on large repositories. The branch was created at the default branch's head and so carried its whole tree; past GitHub's recursive-tree limit every ledger read reported an incomplete tree, publications deferred, and merged runs never ended. It is now created as a parentless commit holding only a README (`migrate-ledger` too), and ledger reads fetch the root listing and the `results/` subtree only — so a branch an older kernel created from a large default branch reads again without a rebuild.
+- The panel preflight refuses a judge key file that holds the author's key, not only one at the author key's path. The wake skips the panel when the key values match, so a key copied under the verifier's name passed every tick and cost every run its panel.
 - Manual harness upgrades honor `--root`, environment, and `.env` state roots. Retry records are replaced atomically; unreadable or invalid records are logged and ignored. Deploy loads the configured cache root before selecting the uv cache.
 - Harness installers reinstall changed binaries rather than refusing repair; Codex checks its installed binary digest separately from the archive pin, and Hermes runtime reuse checks the interpreter digest.
 

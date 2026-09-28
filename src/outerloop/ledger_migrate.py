@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -11,7 +12,12 @@ from dataclasses import asdict, replace
 from outerloop.appauth import resolve_bot_auth
 from outerloop.cli import env_file_values
 from outerloop.github import GitHubClient, GitHubError
-from outerloop.ledger_branch import RESEARCH_LOG_BRANCH, LedgerWriteError
+from outerloop.ledger_branch import (
+    RESEARCH_LOG_BRANCH,
+    LedgerWriteError,
+    create_ledger_branch,
+    ledger_paths,
+)
 from outerloop.progress import (
     LEADER_FILE,
     PROGRESS_FILE,
@@ -57,14 +63,10 @@ def migrate_ledger(
     head = github.branch_head(target, RESEARCH_LOG_BRANCH)
     if head is None:
         raise LedgerReadError("ledger branch head unavailable")
-    created = False
     for _attempt in range(3):
         if head:
-            tree = github.get_tree(target, head)
-            if tree.get("truncated") is not False or not isinstance(tree.get("tree"), list):
-                raise LedgerReadError("incomplete ledger tree")
-            exists = any(item["path"] in patch for item in tree["tree"])
-            if exists and not force and not (created and head == main_sha):
+            exists = any(item["path"] in patch for item in ledger_paths(github, target, head))
+            if exists and not force:
                 raise ValueError(
                     "branch ledger already exists; the files on research-log may be an old "
                     "copy of main's. Use --force to replace it."
@@ -72,12 +74,10 @@ def migrate_ledger(
         if dry_run:
             return table
         if not head:
-            try:
-                github.create_ref(target, f"refs/heads/{RESEARCH_LOG_BRANCH}", main_sha)
-                created = True
-            except GitHubError:
-                # A concurrent creator must pass the same overwrite check.
-                pass
+            # parentless: the ledger never carries main's tree (or its files).
+            # A concurrent creator's branch must pass the same overwrite check.
+            with contextlib.suppress(GitHubError):
+                create_ledger_branch(github, target, main_sha)
             head = github.branch_head(target, RESEARCH_LOG_BRANCH)
             if not head:
                 raise LedgerWriteError("could not create ledger branch")

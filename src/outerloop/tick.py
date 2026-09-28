@@ -2417,6 +2417,20 @@ def _author_config_error(spec: ServiceSpec) -> str:
     return codex_author_config_error(backend, model, spec.image)
 
 
+def _same_key(a: Path, b: Path) -> bool:
+    """Whether two key FILES hold the same key. The wake compares key values
+    — a judge key equal to the author's skips the panel — so the preflight
+    compares them too, or a key copied under a second name passes here and
+    quietly costs every run its panel. Unreadable files compare unequal (the
+    readability checks report them); no key text ever reaches a message."""
+    from outerloop.github import FileTokenProvider
+
+    try:
+        return FileTokenProvider(a).token() == FileTokenProvider(b).token()
+    except Exception:
+        return False
+
+
 def _panel_preflight_error(spec: ServiceSpec) -> str:
     """Why the climb would die at startup on this panel config ("" when it
     won't): the lens spec, then the key file — each checked with the climb's
@@ -2471,13 +2485,13 @@ def _panel_preflight_error(spec: ServiceSpec) -> str:
                     f"{lens_backend} panel key path {key_path} is relative; only absolute paths fly"
                 )
             author = Path(resolve_author_key_file("codex")).expanduser()
-            if key_path.resolve() == author.resolve():
+            if key_path.resolve() == author.resolve() or _same_key(key_path, author):
                 return (
                     f"{lens_backend} panel key file {key_path} is the codex author "
                     "key (role separation: the judge needs its own key)"
                 )
             claude_panel = Path(spec.panel_key_file or PANEL_KEY_DEFAULT).expanduser()
-            if key_path.resolve() == claude_panel.resolve():
+            if key_path.resolve() == claude_panel.resolve() or _same_key(key_path, claude_panel):
                 return (
                     f"{lens_backend} panel key file {key_path} is the claude panel "
                     "key file (an anthropic key must never reach another "
@@ -2530,6 +2544,11 @@ def _panel_preflight_error(spec: ServiceSpec) -> str:
             return (
                 f"panel key file {path} is the author key file "
                 "(role separation: the verifier needs its own key)"
+            )
+        if _same_key(path, author):
+            return (
+                f"panel key file {path} holds the author's key (role separation: "
+                "the verifier needs its own key — every wake would skip the panel)"
             )
         # ADC-only deployments (Vertex covering the claude panel) hold no
         # Anthropic key at all — the same tolerance role_key applies at run

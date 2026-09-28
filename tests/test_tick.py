@@ -1865,6 +1865,44 @@ def test_author_config_preflight_blocks_before_side_effects(
     assert _author_config_error(make()) == ""
 
 
+def test_panel_key_preflight_refuses_a_copy_of_the_author_key(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """The wake skips the panel when a judge key's VALUE equals the author's;
+    the preflight compared only PATHS, so a key copied under the verifier's
+    name passed every tick and cost every run its panel. It now refuses the
+    copy, naming only paths."""
+    from outerloop.tick import ServiceSpec, _panel_preflight_error
+
+    author = tmp_path / "author_key"
+    author.write_text("sk-same\n")
+    author.chmod(0o600)
+    copied = tmp_path / "verifier_key"
+    copied.write_text("sk-same\n")
+    copied.chmod(0o600)
+    distinct = tmp_path / "verifier_key_own"
+    distinct.write_text("sk-other\n")
+    distinct.chmod(0o600)
+    monkeypatch.setenv("OUTERLOOP_CLAUDE_KEY_FILE", str(author))
+    monkeypatch.delenv("OUTERLOOP_AUTHOR_BACKEND", raising=False)
+
+    def spec(key: Path) -> ServiceSpec:
+        return ServiceSpec(
+            qos="q",
+            target="org/pilot",
+            account="a",
+            partition="p",
+            run_root=tmp_path,
+            image="i.sif",
+            home=tmp_path,
+            panel_key_file=str(key),
+        )
+
+    err = _panel_preflight_error(spec(copied))
+    assert "holds the author's key" in err and "sk-same" not in err
+    assert _panel_preflight_error(spec(distinct)) == ""
+
+
 def test_panel_key_preflight_blocks_claim_and_launch(tmp_path: Path, monkeypatch: Any) -> None:
     """Panel on + a key the climb would reject (missing, group-readable,
     empty): the intake lane claims nothing and the self-initiated lane
