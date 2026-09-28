@@ -70,6 +70,10 @@ def test_forbidden_matches_are_component_wise() -> None:
         "outerloop-science/outerloop/",
         "https://github.com/outerloop-science/outerloop",
         "git@github.com:outerloop-science/outerloop.git",
+        "blobfishai/outerloop",
+        "BlobfishAI/Outerloop.git",
+        "https://github.com/blobfishai/outerloop/",
+        "git@github.com:blobfishai/outerloop.git",
     ],
 )
 def test_self_target_spellings_refused(spelling: str) -> None:

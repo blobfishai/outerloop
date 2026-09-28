@@ -815,6 +815,9 @@ def main(argv: list[str] | None = None) -> int:
         "tick", help="run one tick now; --loop keeps ticking (the local loop)", add_help=False
     )
     sub.add_parser(
+        "research", help="bounded parallel research through native subscriptions", add_help=False
+    )
+    sub.add_parser(
         "init",
         help="guided setup: write ~/.config/outerloop/.env and the PAT file",
         add_help=False,
@@ -832,6 +835,10 @@ def main(argv: list[str] | None = None) -> int:
     up.add_argument("--dry-run", action="store_true", help="print the command and exit")
     sub.add_parser("harness", help="inspect or upgrade harness installations", add_help=False)
     argv = sys.argv[1:] if argv is None else list(argv)
+    if argv[:1] == ["research"]:
+        from outerloop import research_cli
+
+        return research_cli.main(argv[1:])
     if argv[:1] == ["harness"]:
         from outerloop.harness_cli import main as harness_main
 

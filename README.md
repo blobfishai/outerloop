@@ -40,6 +40,10 @@ themselves.
 
 ## Get started
 
+For bounded parallel research through Claude Code and Codex subscriptions, this
+fork also provides [`outerloop research`](docs/subscription-research.md).
+It uses native logins, separate worker directories, and durable native resume.
+
 Three commands and one file. You need a repo with a benchmark command, an API
 key for the model that will write the code, and a Slurm cluster or one machine
 with a GPU.

@@ -8,6 +8,9 @@ Versions follow [SemVer](https://semver.org).
 
 ### Fixed
 
+- Subscription research keeps Codex's native tool host enabled for live web
+  search while disabling shell, unified execution, image and extension tools.
+
 - The `research-log` ledger works on large repositories. The branch was created at the default branch's head and so carried its whole tree; past GitHub's recursive-tree limit every ledger read reported an incomplete tree, publications deferred, and merged runs never ended. It is now created as a parentless commit holding only a README (`migrate-ledger` too), and ledger reads fetch the root listing and the `results/` subtree only — so a branch an older kernel created from a large default branch reads again without a rebuild.
 - The panel preflight refuses a judge key file that holds the author's key, not only one at the author key's path. The wake skips the panel when the key values match, so a key copied under the verifier's name passed every tick and cost every run its panel.
 - Manual harness upgrades honor `--root`, environment, and `.env` state roots. Retry records are replaced atomically; unreadable or invalid records are logged and ignored. Deploy loads the configured cache root before selecting the uv cache.
@@ -28,6 +31,10 @@ Versions follow [SemVer](https://semver.org).
 
 ### Added
 
+- `outerloop research run/status/resume` for bounded parallel Claude Code and
+  Codex subscription workers, explicit native profiles, live session binding,
+  terminal-result checks, process-group cleanup, and idempotent follow-up receipts.
+- The self-target guard covers both this maintained fork and its upstream repository.
 - Native Codex and Claude Code authors publish redacted live events and preserve
   their session identity across failed turns. A durable generation and process
   group record refuses overlapping author writers after controller restart.
@@ -51,6 +58,11 @@ Versions follow [SemVer](https://semver.org).
 - Hermes installs a standalone Python and venv once per pinned commit in a sibling runtime, then launches Python directly. Full `init` provisions configured Hermes judges and records their source path; `--no-install-harness` opts out.
 
 ### Upgrading
+
+- No migration for existing run records or parked author sessions. The opt-in
+  research command writes schema-1 records under a separately supplied root;
+  unknown schemas are refused. Existing author and panel authentication is unchanged.
+  Keep active loops on their original installation until a separate migration.
 
 - Upgrading: full run-ID names and legacy 60-character queue names remain readable; shortened names use a derived run key without changing run records. Intake adds `@intake-<issue>` files in the existing pending directory; legacy unsuffixed and agent-slot markers remain readable. Drain queued intake jobs from older submitters (which wrote no marker) before relying on attempt ceilings. Upgrade all kernels together; older kernels do not recognize shortened names or intake markers, so drain those jobs before rollback.
 

@@ -22,6 +22,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 SELF_REPO = "outerloop-science/outerloop"
+SELF_REPOS = frozenset({SELF_REPO, "blobfishai/outerloop"})
 # The contract file in the target repo; never a writable path for the agent.
 CONTRACT_NAME = ".outerloop.yaml"
 ALWAYS_FORBIDDEN: tuple[str, ...] = (".github", CONTRACT_NAME)
@@ -444,7 +445,7 @@ def _overlaps(allowed: PurePosixPath, forbidden: PurePosixPath) -> bool:
 
 def load_contract(text: str, target_repo: str) -> Contract:
     """Parse and validate a contract for `target_repo`."""
-    if normalize_repo(target_repo) == SELF_REPO:
+    if normalize_repo(target_repo) in SELF_REPOS:
         raise SelfTargetError("outerloop is never a valid target of itself")
     if len(text.encode()) > MAX_CONTRACT_BYTES:
         raise ContractError(f"contract exceeds {MAX_CONTRACT_BYTES} bytes")
