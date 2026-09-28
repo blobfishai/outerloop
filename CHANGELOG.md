@@ -8,6 +8,7 @@ Versions follow [SemVer](https://semver.org).
 
 ### Fixed
 
+- Measurement caches are versioned by checkout policy and cone: evaluation identities and baseline cache directories include them, so a result measured on a session-narrowed tree (before the sparse-state pin) or under another cone is never reused.
 - A session that narrowed its own checkout in a whole-tree workspace no longer has the hidden files sealed as deletions (a false out-of-scope refusal): an absent file the session's index marks skip-worktree reads as unchanged, and evals still measure it.
 - Terminal notebook recovery restores the run's contract cone before sealing,
   preserving files omitted by sparse checkout. Scope paths absent at the base
@@ -58,6 +59,8 @@ Versions follow [SemVer](https://semver.org).
 - Read-only `outerloop limits` reports operator ceilings and fleet-owned running/pending GPU usage.
 
 ### Changed
+
+- Upgrading: drain active attempts and evaluation jobs before upgrade or rollback, and upgrade all kernels together. Evaluation identities and baseline cache directories include the checkout policy and cone: old results are retained but remeasured, new job names do not adopt old in-flight jobs, and a rollback leaves the new cache namespace unused.
 
 - Upgrading: `workspace.sparse` adds no run state; runs without it keep whole-tree workspaces, and a declared cone applies from the base contract of each run. Older kernels reject a contract carrying `workspace` (strict keys): upgrade the kernel before adding it. A declared cone needs git 2.36 or newer on the tick and job hosts.
 
