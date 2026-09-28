@@ -6,6 +6,20 @@ Versions follow [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+### Added
+
+- `outerloop research run/status/resume` for bounded parallel Claude Code and
+  Codex subscription workers, explicit native profiles, live session binding,
+  terminal-result checks, process-group cleanup, and idempotent follow-up receipts.
+- The self-target guard covers both this maintained fork and its upstream repository.
+
+### Upgrading
+
+- No migration for existing run records or parked author sessions. The opt-in
+  research command writes schema-1 records under a separately supplied root;
+  unknown schemas are refused. Existing author and panel authentication is unchanged.
+  Keep active loops on their original installation until a separate migration.
+
 ## [0.2.1] - 2026-09-25
 
 ### Upgrading

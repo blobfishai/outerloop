@@ -689,7 +689,13 @@ def test_start_refuses_without_the_claude_model(clean_env, monkeypatch, capsys, 
     monkeypatch.setattr(cli, "plan_start", lambda **kw: pytest.fail("must refuse before planning"))
     monkeypatch.setattr(cli.subprocess, "run", lambda *a, **kw: pytest.fail("must not execute"))
     monkeypatch.setattr(cli, "_exec", lambda *a: pytest.fail("must not exec"))
-    argv = ["start", "--local", *(["--dry-run"] if dry_run else [])]
+    argv = [
+        "start",
+        "--local",
+        "--root",
+        str(clean_env / "state"),
+        *(["--dry-run"] if dry_run else []),
+    ]
     assert main(argv) == 2
     err = capsys.readouterr().err
     assert "OUTERLOOP_CLAUDE_MODEL is not set" in err
@@ -1118,8 +1124,9 @@ def test_start_sees_steward_key_from_env_file(clean_env, monkeypatch, capsys):
         return 0
 
     monkeypatch.setattr(cli, "_exec", capture_exec)
-    assert main(["start", "--local"]) == 2
+    argv = ["start", "--local", "--root", str(clean_env / "state")]
+    assert main(argv) == 2
     assert "the steward" in capsys.readouterr().err
     path.write_text(path.read_text() + "OUTERLOOP_CLAUDE_MODEL=claude-x\n")
-    assert main(["start", "--local"]) == 0
+    assert main(argv) == 0
     assert exports[-1]["OUTERLOOP_STEWARD_KEY_FILE"] == "/keys/steward"
