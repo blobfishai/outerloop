@@ -32,9 +32,9 @@ The knobs that shape a climb, all optional:
 
 ### Sparse workspaces
 
-On a large monorepo each attempt's clone, each dispatched eval's checkout,
-and each panel read is a full checkout. `workspace.sparse` narrows all of
-them to a cone:
+On a large monorepo each solver attempt's clone, each dispatched eval's checkout,
+and each panel read is a full checkout. `workspace.sparse` narrows these
+solver workspaces to a cone:
 
 ```yaml
 workspace:
@@ -60,8 +60,9 @@ in). The kernel's cone — never the workspace's own sparse state — decides
 what a sealed snapshot, an eval, or a judge sees: the session can reshape its
 own checkout, but every kernel checkout writes the kernel's patterns itself.
 Sealing reads an absent out-of-cone file as unchanged, and a new file outside
-the cone is still staged, so the scope check sees it. Requires git 2.34 or
-newer.
+the cone is still staged, so the scope check sees it. Requires git 2.36 or
+newer. Steward runs currently keep full checkouts, so allow disk space for them
+separately when stewardship is enabled.
 
 For GPU benchmarks `gpu_hours_per_run` is a real budget. An author's
 experiment launches and its gate evals (baseline and candidate when paired)

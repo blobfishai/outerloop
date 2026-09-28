@@ -50,7 +50,7 @@ Versions follow [SemVer](https://semver.org).
   home when moving a run. Drain authors before upgrading or downgrading. Older
   kernels do not enforce this sidecar's writer ownership. See
   [author session control](docs/design/session-control.md) for recovery limits.
-- Contract `workspace.sparse`: a cone-mode sparse checkout for every tree the kernel builds — the attempt's clone, each dispatched eval and launch, and the panel's base and head — for monorepo targets where each full checkout costs gigabytes. The kernel adds the directories holding scope, the roadmap and line memory; seals keep what the cone leaves out; the wake re-imposes the cone before the session resumes. The attempt clone now checks out once, after reading the contract from the base commit.
+- Contract `workspace.sparse`: a cone-mode sparse checkout for the solver attempt's clone, each dispatched eval and launch, and the panel's base and head, for monorepo targets where each full checkout costs gigabytes. The kernel adds the directories holding scope, the roadmap and line memory; seals keep what the cone leaves out; the wake re-imposes the cone before the session resumes. The attempt clone now checks out once, after reading the contract from the base commit. Steward runs retain full checkouts.
 
 - Packaged `harnesses.toml` owns Claude, Codex, and Hermes pins. `outerloop harness status` reports installed versions, paths, drift, and operator overrides; `harness upgrade [name...]` verifies versioned installations before atomically recording their paths. Successful kernel deploys upgrade only configured backends; failures retain the previous installation.
 
@@ -59,7 +59,7 @@ Versions follow [SemVer](https://semver.org).
 
 ### Changed
 
-- Upgrading: `workspace.sparse` adds no run state; runs without it keep whole-tree workspaces, and a declared cone applies from the base contract of each run. Older kernels reject a contract carrying `workspace` (strict keys): upgrade the kernel before adding it. A declared cone needs git 2.34 or newer on the tick and job hosts.
+- Upgrading: `workspace.sparse` adds no run state; runs without it keep whole-tree workspaces, and a declared cone applies from the base contract of each run. Older kernels reject a contract carrying `workspace` (strict keys): upgrade the kernel before adding it. A declared cone needs git 2.36 or newer on the tick and job hosts.
 
 - Upgrading: legacy Codex archive-only markers and Hermes runtimes without interpreter digests are reinstalled on upgrade; legacy Hermes runtimes remain launchable. Existing retry records remain readable, and corrupt records are treated as empty. Run state and in-flight PRs are unchanged; rollback leaves the additional digest files unused.
 
