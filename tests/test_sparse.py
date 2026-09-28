@@ -686,3 +686,48 @@ def test_submit_preflight_counts_a_rewritten_base_as_moved(tmp_path):
     _git(origin, "push", "-q", "--force", str(bare), "main")
 
     assert attempt._submit_preflight(ws, "main", pin).status == "outdated-pin"
+
+
+@pytest.mark.parametrize(
+    "folded, measured, expected",
+    [
+        ("pkg/a/deep/y.py", "base", "outdated-pin"),  # the gate's base lacks what the cone sees
+        ("data/stripe/t.json", "base", "ready"),  # a fold the cone cannot see
+        ("pkg/a/deep/y.py", "line", "outdated-pin"),  # a line head holding the older base
+        ("data/stripe/t.json", "line", "ready"),
+        ("pkg/a/deep/y.py", "folded", "ready"),  # the gate already measures the fold
+    ],
+)
+def test_submit_preflight_checks_the_base_the_gate_measures(tmp_path, folded, measured, expected):
+    """The gate measures `measured_base`, independently of the freshness pin.
+    A head that folded base changes the cone can see beyond what that
+    base holds is outdated even though its own pin is current: the gate would
+    credit another team's change to the author."""
+    from outerloop import attempt
+
+    origin = _repo(tmp_path)
+    bare = tmp_path / "origin.git"
+    _git(origin, "clone", "--bare", str(origin), str(bare))
+    ws = Workspace.clone(str(bare), tmp_path / "ws", checkout=False)
+    ws.sparse = ("pkg/a",)
+    ws.apply_sparse()
+    ws.git("checkout", "-q", "-B", "main", "origin/main")
+    author = ("-c", "user.name=t", "-c", "user.email=t@t")
+    line_head = ""
+    if measured == "line":
+        (ws.root / "pkg/a/line.py").write_text("an earlier run on this line\n")
+        ws.add_all()
+        ws.git(*author, "commit", "-qm", "line")
+        line_head = ws.git("rev-parse", "HEAD").strip()
+    parked = ws.git("rev-parse", "HEAD").strip()
+    (origin / folded).write_text("another team's change\n")
+    _git(origin, "commit", "-qam", "another team")
+    _git(origin, "push", "-q", str(bare), "main")
+    tip = _git(origin, "rev-parse", "HEAD")
+    ws.fetch_origin()
+    ws.git(*author, "merge", "-q", "--no-edit", tip)
+    (ws.root / "pkg/a/x.py").write_text("candidate\n")
+    ws.git(*author, "commit", "-qam", "candidate")
+    base = {"base": parked, "line": line_head, "folded": tip}[measured]
+
+    assert attempt._submit_preflight(ws, "main", tip, base).status == expected
