@@ -384,7 +384,10 @@ def test_apply_sparse_undoes_a_session_that_dropped_the_cone(tmp_path):
 
 @pytest.mark.parametrize("sparse", [False, True])
 @pytest.mark.parametrize("recorded_base", [False, True])
-def test_terminal_notebook_preserves_omitted_files(tmp_path, monkeypatch, sparse, recorded_base):
+@pytest.mark.parametrize("commit_contract", [False, True])
+def test_terminal_notebook_preserves_omitted_files(
+    tmp_path, monkeypatch, sparse, recorded_base, commit_contract
+):
     """The terminal fallback reconstructs a workspace from a saved run record.
     Its published notebook must retain omitted files and capture visible edits,
     including for records without a base SHA and legacy whole-tree contracts.
@@ -437,8 +440,14 @@ def test_terminal_notebook_preserves_omitted_files(tmp_path, monkeypatch, sparse
     ws.push(line)
     (ws.root / "pkg/a/x.py").write_text("edited\n")
     (ws.root / "pkg/a/deep/y.py").unlink()
-    # The terminal must use the saved base contract, not the session's file.
-    (ws.root / ".outerloop.yaml").write_text(_contract())
+    # A saved base owns the cone. Even without that legacy field, an author
+    # committing a whole-tree contract must not turn omitted files into deletions.
+    (ws.root / ".outerloop.yaml").write_text(
+        _contract().replace("direction: max", "direction: max, lines: true")
+    )
+    if commit_contract:
+        ws.git("add", ".outerloop.yaml")
+        ws.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "session contract")
     monkeypatch.setattr(attempt, "target_clone_url", lambda target: str(bare))
 
     attempt.finish_run(root, record, ABORTED, "stopped", 2, auth=auth, bot_login="test-bot")
