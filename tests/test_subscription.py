@@ -318,19 +318,27 @@ def test_same_account_alias_and_unknown_fields_fail_before_execution(tmp_path):
         Plan.model_validate({"goal": "x", "workers": [], "api_key": "not-supported"})
 
 
-def test_fresh_and_resume_commands_keep_auth_and_tool_policy(tmp_path):
+@pytest.mark.parametrize("tools", ["none", "read"])
+def test_fresh_and_resume_commands_keep_auth_and_tool_policy(tmp_path, tools):
     for backend in ("claude", "codex"):
         profile = fixture_profile(tmp_path / backend, backend)
         for sid in ("", SESSION):
-            args = native_command(profile, tmp_path, sid, "none", 3)
+            args = native_command(profile, tmp_path, sid, tools, 3)
             assert "--bare" not in args and "--ephemeral" not in args
             assert "--no-session-persistence" not in args
             if backend == "codex":
                 assert 'forced_login_method="chatgpt"' in args
                 assert 'model_reasoning_effort="max"' in args
+                assert f"web_search={json.dumps('live' if tools == 'read' else 'disabled')}" in args
+                assert f"features.code_mode_host={json.dumps(tools == 'read')}" in args
+                assert "features.code_mode=false" in args
+                assert "features.shell_tool=false" in args
+                assert "features.unified_exec=false" in args
+                assert "features.image_generation=false" in args
                 assert "--sandbox" not in args if sid else "--sandbox" in args
             else:
-                assert args[args.index("--tools") + 1] == ""
+                expected = "Read,Glob,Grep,WebSearch,WebFetch" if tools == "read" else ""
+                assert args[args.index("--tools") + 1] == expected
                 assert args[args.index("--effort") + 1] == "max"
 
 

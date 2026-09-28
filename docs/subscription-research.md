@@ -84,9 +84,12 @@ uv run outerloop research status --root /private/path/to/research-01
 
 There are at most eight assignments and four concurrent workers. Each gets its own
 directory. Both providers use maximum reasoning effort. `tools: "none"` supports
-closed-book fixtures; `read` permits research tools without code execution or
+closed-book fixtures; `read` permits research tools without shell access or
 workspace edits. Claude has Read/Glob/Grep/WebSearch/WebFetch; Codex has native
-web search with its shell and extension tools disabled. Their tool surfaces are
+web search with its shell and extension tools disabled. Codex's native tool host
+remains enabled in `read` mode because current CLIs use it for live web search;
+shell, unified execution, image generation and extension tools stay disabled.
+Their tool surfaces are
 different; control the supplied context when comparing their results. Put shared
 source material in the goal or assignment text. There is no automatic task splitting,
 code experiment launch, synthesis, evaluator, or cost-based account switching.
@@ -145,7 +148,8 @@ reconciliation command. Keep its records and native history for inspection.
 Fork base: `outerloop-science/outerloop` at
 `5563c46cee5371f5056690bc71524af04643580e` (package version 0.2.1, Apache-2.0).
 The initial audit used `224c4c7`; upstream harness pinning and operator-limit
-changes were merged before final qualification.
+changes were merged before final qualification. The maintained fork's ledger and
+native-author-control fixes through `1456b1d` are also included.
 The implementation is original code against the existing `Harness.run` protocol.
 No Hopper, Agent Orchestrator or OpenSwarm runtime code is incorporated.
 
