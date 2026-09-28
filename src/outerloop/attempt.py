@@ -1272,7 +1272,7 @@ def run_author_leg(
         base_sha,
         snapshot,
         submit_preflight=lambda: _submit_preflight(
-            ws, str(record.stage.get("base_branch") or "main"), pinned_tip
+            ws, str(record.stage.get("base_branch") or "main"), pinned_tip, base_sha
         ),
         resume_session_id=record.resume_session_id,
         redact_secrets=secrets,
@@ -2152,11 +2152,15 @@ def _effective_pin(ws: Workspace, tip: str, cone: tuple[str, ...]) -> str:
     return tip
 
 
-def _submit_preflight(ws: Workspace, base_branch: str, pinned_tip: str) -> SubmitPreflight:
+def _submit_preflight(
+    ws: Workspace, base_branch: str, pinned_tip: str, measured_base: str = ""
+) -> SubmitPreflight:
     """Refresh submit ancestry; ordinary Git failures do not assert staleness.
     On a busy repository the base keeps moving while the author works. A move
     the kernel's cone cannot see changes no measured tree, so it neither makes
-    the head stale nor the pin outdated."""
+    the head stale nor the pin outdated. The gate measures against
+    `measured_base`, so a head that folded base changes the cone can see beyond
+    what that base holds is outdated: the gate would credit them to the author."""
     ensure_regular_git_dir(ws.root)
     try:
         ws.fetch_origin()
@@ -2171,6 +2175,13 @@ def _submit_preflight(ws: Workspace, base_branch: str, pinned_tip: str) -> Submi
             or not (pinned_tip and _is_ancestor(ws, pinned_tip, head))
         ):
             return SubmitPreflight("stale", tip, base_branch)
+        if measured_base and measured_base != common:
+            # The newest base commit the measured base holds, against the one
+            # the head holds. A fold can occur during a leg or a research line
+            # can carry improvements beyond its own measured base.
+            held = ws.git("merge-base", measured_base, tip).strip()
+            if held != common and _moved_in_cone(ws, held, common, ws.sparse):
+                return SubmitPreflight("outdated-pin", tip, base_branch)
         if not pinned_tip:
             return SubmitPreflight("unknown", tip, base_branch)
         pin_current = pinned_tip == tip or (
@@ -2687,8 +2698,10 @@ def resume_run(
     # remote config), the session only ever reads local refs. `sleep`
     # thereby doubles as the author's sync primitive. Best-effort: a fetch
     # outage must not cost the wake.
+    base_fetched = False
     try:
         ws.fetch_origin()
+        base_fetched = True
     except Exception as exc:
         log.warning("wake fetch failed for %s: %s", run_id, exc)
     scope_base = f"refs/remotes/origin/{stage.get('base_branch') or base_branch}"
@@ -2711,7 +2724,23 @@ def resume_run(
         }
         record = dc_replace(record, stage=stage)
 
-    if record.pr_url and stage.get("phase") == "author-sleep":
+    refresh_measurement_base = bool(record.pr_url)
+    if base_fetched and not refresh_measurement_base and stage.get("phase") == "author-sleep":
+        # Before its first PR, an ordinary author also needs the current base:
+        # otherwise folding a fetched improvement passes preflight while the
+        # gate still credits that improvement against the old baseline. A
+        # research line can have its own measured tip; its existing advance
+        # check below owns that pin instead.
+        # A measured line tip can carry a prior author's contract edits, and
+        # the author can retarget the checkout's launch ref. Classify from
+        # the canonical base fetched above, including for legacy records.
+        # On fetch failure, keep the recorded baseline: cached origin refs
+        # are also author-writable and cannot authorize changing that pin.
+        prior_contract = load_contract(contract_at(ws, pinned_tip), record.target)
+        prior_bench = _benchmark(prior_contract, record.benchmark)
+        refresh_measurement_base = not _line_ref_for(prior_bench, record.agent_id)
+
+    if refresh_measurement_base and stage.get("phase") == "author-sleep":
         base_branch = str(stage.get("base_branch") or base_branch)
         # base_sha is the wake-time pin; merge and inbox checks use ancestry.
         # A tip that moved only outside the cone pins what HEAD already holds.
@@ -4677,7 +4706,9 @@ def live_attempt(
                 measurer,
                 pre_session_sha,
                 snapshot,
-                submit_preflight=lambda: _submit_preflight(ws, base_branch, pinned_tip),
+                submit_preflight=lambda: _submit_preflight(
+                    ws, base_branch, pinned_tip, pre_session_sha
+                ),
                 redact_secrets=secrets,
                 ruler=RULER,
                 changed_paths=changed_paths,
