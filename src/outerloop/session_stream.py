@@ -71,6 +71,8 @@ def communicate_events(
         return value
 
     def frame(raw: bytes) -> None:
+        if time.monotonic() >= deadline:
+            raise subprocess.TimeoutExpired(process.args, timeout_s)
         try:
             text = raw.decode("utf-8")
             event = scrub(json.loads(text))

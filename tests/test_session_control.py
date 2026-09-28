@@ -276,3 +276,21 @@ def test_ending_during_login_prevents_prompt_delivery(tmp_path, monkeypatch):
     assert not (workspace / "received-prompt.json").exists()
     assert load_record(tmp_path, "r1").state == ENDED
     assert required_binding(directory).session_id == ""
+
+
+def test_event_batch_cannot_defer_walltime_until_every_callback_finishes():
+    from outerloop.session_stream import communicate_events
+
+    process = subprocess.Popen(
+        [sys.executable, "-c", 'import os; os.write(1, b\'{"type":"progress"}\\n\' * 100)'],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    start = time.monotonic()
+    result = communicate_events(process, "", 0.3, "codex", "", lambda event: time.sleep(0.02), None)
+    assert result.error == "timeout"
+    assert time.monotonic() - start < 1
+    assert process.poll() is not None
