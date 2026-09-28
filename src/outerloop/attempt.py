@@ -1974,10 +1974,35 @@ def _kernel_cone(
     return workspace_cone(contract, kind, line_dirs=(LINE_MEMORY_DIR,) if lines else ())
 
 
+def _recovery_contract(
+    ws: Workspace, record: RunRecord, bases: Iterable[str]
+) -> tuple[Contract, tuple[str, ...]]:
+    """The contract and cone at the first of `bases` (kernel-recorded commits,
+    the launch base first) where both rebuild. A research line's recorded pin
+    is the line tip, which can carry an earlier author's contract: one that
+    turns lines off, drops a declared directory or does not parse. Raises the
+    last failure when no base rebuilds."""
+    failure: Exception = ValueError("no kernel-recorded base to read the contract from")
+    for base in dict.fromkeys(b for b in bases if b):
+        try:
+            contract = load_contract(contract_at(ws, base), record.target)
+            return contract, _kernel_cone(ws, contract, base, record.benchmark, record.agent_id)
+        except Exception as exc:
+            failure = exc
+    raise failure
+
+
 # The kernel's own record of the line head, kept in the workspace's refs: a
 # session's `git reset`/`checkout` moves only the checked-out branch, never
 # this ref, so a seal parents on the line the kernel last sealed (#368).
 LINE_HEAD_REF = "refs/outerloop/line"
+# The base commit the run's contract and cone were read from, recorded at
+# launch before any line checkout. Terminal recovery reads the contract here
+# first: a run that never parked records no base, and a research line's
+# recorded base is the line tip, which can carry an earlier author's contract.
+# It never reads the author's HEAD, where a session may have committed a
+# contract edit or removed a declared directory.
+BASE_REF = "refs/outerloop/base"
 
 
 def _is_line_memory(path: str) -> bool:
@@ -4275,6 +4300,7 @@ def live_attempt(
         # measure, the tree the PR will land on. A missing base branch fails
         # loudly as attempt-error.
         ws.git("checkout", "-q", "-B", base_branch, f"origin/{base_branch}")
+        ws.git("update-ref", BASE_REF, "HEAD")
         _exclude_merge_artifacts(workspace)
         contract_text = contract_text_in_tree(workspace)
         contract = load_contract(contract_text, config.target)
@@ -5386,12 +5412,19 @@ def finish_run(
     if not snapshot_attempted and ws is not None and ws.root.is_dir():
         line_ref = f"agents/{record.agent_id}"
         try:
-            base_sha = str(record.stage.get("base_sha") or "HEAD")
-            contract = load_contract(contract_at(ws, base_sha), record.target)
             # Terminal recovery reconstructs the workspace without its in-memory
             # cone. Restore the contract's view before sealing so omitted files
             # remain unchanged. Do not re-checkout the session's final edits.
-            ws.sparse = _kernel_cone(ws, contract, base_sha, record.benchmark, record.agent_id)
+            contract, ws.sparse = _recovery_contract(
+                ws,
+                record,
+                (
+                    _rev(ws, BASE_REF),
+                    # workspaces older than BASE_REF
+                    str(record.stage.get("base_sha") or ""),
+                    _rev(ws, "refs/remotes/origin/HEAD"),
+                ),
+            )
             bench = _benchmark(contract, record.benchmark)
             line_ref = _line_ref_for(bench, record.agent_id)
             _push_line_snapshot(ws, line_ref, record.run_id, ending, secrets, bot_login=bot_login)

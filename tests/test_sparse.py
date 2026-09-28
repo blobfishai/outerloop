@@ -382,26 +382,16 @@ def test_apply_sparse_undoes_a_session_that_dropped_the_cone(tmp_path):
     assert _files(ws.root) == {p for p in FILES if in_cone(p, ws.sparse)}
 
 
-@pytest.mark.parametrize("sparse", [False, True])
-@pytest.mark.parametrize("recorded_base", [False, True])
-@pytest.mark.parametrize("commit_contract", [False, True])
-def test_terminal_notebook_preserves_omitted_files(
-    tmp_path, monkeypatch, sparse, recorded_base, commit_contract
-):
-    """The terminal fallback reconstructs a workspace from a saved run record.
-    Its published notebook must retain omitted files and capture visible edits,
-    including for records without a base SHA and legacy whole-tree contracts.
-    """
+class _LocalAuth:
+    def token(self) -> str:
+        return "local-test-token"
+
+
+def _terminal_run(tmp_path, monkeypatch, *, sparse: bool, recorded_base: bool):
+    """A run with a research line, its workspace checked out on the kernel's
+    cone and pushed to a local bare origin, as terminal recovery finds it."""
     from outerloop import attempt
-    from outerloop.runstate import (
-        ABORTED,
-        ENDED,
-        RUNNING,
-        RunRecord,
-        load_record,
-        run_dir,
-        save_record,
-    )
+    from outerloop.runstate import RUNNING, RunRecord, run_dir, save_record
 
     origin = _repo(tmp_path)
     contract = _contract(
@@ -424,12 +414,7 @@ def test_terminal_notebook_preserves_omitted_files(
         stage={"base_sha": base} if recorded_base else {},
     )
     save_record(root, record, 1)
-
-    class LocalAuth:
-        def token(self) -> str:
-            return "local-test-token"
-
-    auth = LocalAuth()
+    auth = _LocalAuth()
     ws = Workspace.clone(str(bare), run_dir(root, record.run_id) / "ws", auth=auth, checkout=False)
     ws.sparse = attempt._kernel_cone(
         ws, load_contract(contract, record.target), base, record.benchmark, record.agent_id
@@ -438,6 +423,26 @@ def test_terminal_notebook_preserves_omitted_files(
     line = "agents/agent-01"
     ws.git("checkout", "-q", "-B", line, base)
     ws.push(line)
+    monkeypatch.setattr(attempt, "target_clone_url", lambda target: str(bare))
+    return root, record, auth, ws, bare, base, line
+
+
+@pytest.mark.parametrize("sparse", [False, True])
+@pytest.mark.parametrize("recorded_base", [False, True])
+@pytest.mark.parametrize("commit_contract", [False, True])
+def test_terminal_notebook_preserves_omitted_files(
+    tmp_path, monkeypatch, sparse, recorded_base, commit_contract
+):
+    """The terminal fallback reconstructs a workspace from a saved run record.
+    Its published notebook must retain omitted files and capture visible edits,
+    including for records without a base SHA and legacy whole-tree contracts.
+    """
+    from outerloop import attempt
+    from outerloop.runstate import ABORTED, ENDED, load_record
+
+    root, record, auth, ws, bare, base, line = _terminal_run(
+        tmp_path, monkeypatch, sparse=sparse, recorded_base=recorded_base
+    )
     (ws.root / "pkg/a/x.py").write_text("edited\n")
     (ws.root / "pkg/a/deep/y.py").unlink()
     # A saved base owns the cone. Even without that legacy field, an author
@@ -448,7 +453,6 @@ def test_terminal_notebook_preserves_omitted_files(
     if commit_contract:
         ws.git("add", ".outerloop.yaml")
         ws.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "session contract")
-    monkeypatch.setattr(attempt, "target_clone_url", lambda target: str(bare))
 
     attempt.finish_run(root, record, ABORTED, "stopped", 2, auth=auth, bot_login="test-bot")
 
@@ -460,6 +464,108 @@ def test_terminal_notebook_preserves_omitted_files(
         "M\tpkg/a/x.py",
         "D\tpkg/a/deep/y.py",
     }
+
+
+@pytest.mark.parametrize("sparse", [False, True])
+@pytest.mark.parametrize("launch_ref", [False, True])
+@pytest.mark.parametrize("edit", ["remove_declared", "remove_contract", "malformed_contract"])
+def test_terminal_notebook_never_reads_the_contract_at_the_authors_head(
+    tmp_path, monkeypatch, sparse, launch_ref, edit
+):
+    """A run that never parked has no recorded base. Its terminal reads the
+    contract at the launch base (or, in a workspace older than that ref, the
+    remote default branch), so a committed removal of a declared directory, a
+    removed contract or a malformed one still seals the notebook, and the
+    author's deletions still reach the line."""
+    from outerloop import attempt
+    from outerloop.runstate import ABORTED, ENDED, load_record
+
+    root, record, auth, ws, bare, base, line = _terminal_run(
+        tmp_path, monkeypatch, sparse=sparse, recorded_base=False
+    )
+    if launch_ref:
+        ws.git("update-ref", attempt.BASE_REF, base)
+        ws.git("remote", "set-head", "origin", "--delete")  # so only the launch ref can serve
+    (ws.root / "AGENT_MEMORY.md").write_text("notes\n")
+    if edit == "remove_declared":
+        ws.git("rm", "-r", "-q", "pkg/a")
+    elif edit == "remove_contract":
+        ws.git("rm", "-q", ".outerloop.yaml")
+    else:
+        (ws.root / ".outerloop.yaml").write_text("benchmarks: [\n")
+        ws.git("add", ".outerloop.yaml")
+    ws.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "session edit")
+
+    attempt.finish_run(root, record, ABORTED, "stopped", 2, auth=auth, bot_login="test-bot")
+
+    assert load_record(root, record.run_id).state == ENDED
+    assert _git(bare, "show", f"{line}:AGENT_MEMORY.md") == "notes"
+    assert _git(bare, "show", f"{line}:data/stripe/t.json") == "data/stripe/t.json"
+    authored = {
+        "remove_declared": {"D\tpkg/a/x.py", "D\tpkg/a/deep/y.py"},
+        "remove_contract": {"D\t.outerloop.yaml"},
+        "malformed_contract": {"M\t.outerloop.yaml"},
+    }[edit]
+    assert set(_git(bare, "diff", "--name-status", base, line).splitlines()) == authored | {
+        "A\tAGENT_MEMORY.md"
+    }
+
+
+@pytest.mark.parametrize("earlier", ["lines_off", "remove_declared", "malformed_contract"])
+def test_terminal_reads_the_launch_base_before_a_recorded_line_tip(tmp_path, monkeypatch, earlier):
+    """A research line's recorded pin is the line tip, which can carry an
+    earlier author's seal: a valid contract that turns lines off, a removed
+    declared directory or a broken contract. The terminal reads the launch
+    base first, so the notebook is still sealed."""
+    from dataclasses import replace
+
+    from outerloop import attempt
+    from outerloop.runstate import ABORTED, ENDED, load_record
+
+    root, record, auth, ws, bare, base, line = _terminal_run(
+        tmp_path, monkeypatch, sparse=True, recorded_base=False
+    )
+    ws.git("update-ref", attempt.BASE_REF, base)
+    if earlier == "lines_off":
+        text = (ws.root / ".outerloop.yaml").read_text()
+        (ws.root / ".outerloop.yaml").write_text(text.replace(", lines: true", ""))
+        ws.git("add", ".outerloop.yaml")
+    elif earlier == "remove_declared":
+        ws.git("rm", "-r", "-q", "pkg/a")
+    else:
+        (ws.root / ".outerloop.yaml").write_text("benchmarks: [\n")
+        ws.git("add", ".outerloop.yaml")
+    ws.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "earlier seal")
+    ws.push(line)
+    tip = ws.git("rev-parse", "HEAD").strip()
+    (ws.root / "AGENT_MEMORY.md").write_text("notes\n")
+    record = replace(record, stage={"base_sha": tip})
+
+    attempt.finish_run(root, record, ABORTED, "stopped", 2, auth=auth, bot_login="test-bot")
+
+    assert load_record(root, record.run_id).state == ENDED
+    assert _git(bare, "show", f"{line}:AGENT_MEMORY.md") == "notes"
+    assert _git(bare, "show", f"{line}:data/stripe/t.json") == "data/stripe/t.json"
+    assert _git(bare, "diff", "--name-status", tip, line) == "A\tAGENT_MEMORY.md"
+
+
+def test_terminal_without_a_kernel_recorded_base_seals_nothing(tmp_path, monkeypatch):
+    """With no recorded base, no launch ref and no remote default branch, the
+    terminal refuses to read the contract at the author's HEAD: the line keeps
+    the kernel's last push and the run still ends."""
+    from outerloop import attempt
+    from outerloop.runstate import ABORTED, ENDED, load_record
+
+    root, record, auth, ws, bare, base, line = _terminal_run(
+        tmp_path, monkeypatch, sparse=True, recorded_base=False
+    )
+    ws.git("remote", "set-head", "origin", "--delete")
+    (ws.root / "AGENT_MEMORY.md").write_text("notes\n")
+
+    attempt.finish_run(root, record, ABORTED, "stopped", 2, auth=auth, bot_login="test-bot")
+
+    assert load_record(root, record.run_id).state == ENDED
+    assert _git(bare, "rev-parse", line) == base
 
 
 @pytest.mark.parametrize("new_path", ["newpkg", "pkg/newpkg", "pkg/newfile.py"])

@@ -13,6 +13,14 @@ Versions follow [SemVer](https://semver.org).
 - Terminal notebook recovery restores the run's contract cone before sealing,
   preserving files omitted by sparse checkout. Scope paths absent at the base
   can become files or directories without being hidden from evals or panels.
+- Terminal notebook recovery no longer reads the contract at the author's HEAD
+  when the run record has no base (a run that never parked). A committed removal
+  of a declared directory, a removed contract or a malformed one there lost the
+  line's final notebook. Recovery now reads the base the launch read the contract
+  from (`refs/outerloop/base`), then the recorded base (workspaces older than
+  that ref), then the remote default branch, and uses the first whose contract
+  and cone rebuild. A research line's recorded base is the line tip, which can
+  carry an earlier author's contract, for example one that turns lines off.
 
 - Subscription research keeps Codex's native tool host enabled for live web
   search while disabling shell, unified execution, image and extension tools.
