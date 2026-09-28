@@ -440,7 +440,9 @@ def test_cached_baseline_is_keyed_by_image_and_command(tmp_path):
         d, "main", BASE, value=0.6, seed=4, run_tag="r", image="/a.sif", command="run main"
     )
     got = read_baseline_cache(d, "main", BASE, image="/a.sif", command="run main")
-    assert got and got["value"] == 0.6 and not list(d.glob("*.tmp"))
+    # entries nest under checkout-<key>/, so both checks must walk the tree
+    assert got and got["value"] == 0.6 and list(d.rglob("*.json"))
+    assert not list(d.rglob("*.tmp"))
 
 
 def test_baseline_cache_preserves_legacy_and_other_cone_artifacts(tmp_path):
