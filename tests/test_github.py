@@ -811,23 +811,28 @@ def test_ledger_cas_recomputes_and_bounds_retries(provider, monkeypatch, conflic
 
 
 @pytest.mark.parametrize("head", ["existing", ""])
-def test_ledger_branch_creation_uses_only_callers_pin(provider, head):
+def test_ledger_branch_is_created_parentless_beside_the_callers_pin(provider, head):
+    """An absent ledger branch starts at a parentless README-only commit —
+    never at the pin, whose (possibly huge) tree a recursive ledger read
+    could not return; the pin survives as provenance in the message."""
     from outerloop.ledger_branch import ensure_ledger_branch
 
-    transport = FakeTransport([{}])
+    transport = FakeTransport([{"sha": "blob"}, {"sha": "tree"}, {"sha": "root"}, {}])
     client = GitHubClient(auth=provider, transport=transport)
     from unittest.mock import patch
 
     with patch.object(client, "branch_head", return_value=head):
         ensure_ledger_branch(client, "org/repo", "pinned-main")
-    assert len(transport.requests) == (0 if head else 1)
+    assert len(transport.requests) == (0 if head else 4)
     if not head:
-        payload = transport.requests[0].data
-        assert isinstance(payload, bytes)
-        assert json.loads(payload) == {
-            "ref": "refs/heads/research-log",
-            "sha": "pinned-main",
-        }
+        payloads = []
+        for request in transport.requests:
+            assert isinstance(request.data, bytes)
+            payloads.append(json.loads(request.data))
+        _blob, tree, commit, ref = payloads
+        assert "base_tree" not in tree and [e["path"] for e in tree["tree"]] == ["README.md"]
+        assert commit["parents"] == [] and "pinned-main" in commit["message"]
+        assert ref == {"ref": "refs/heads/research-log", "sha": "root"}
 
 
 def test_shared_research_branch_constant():

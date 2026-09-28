@@ -295,11 +295,43 @@ class GitHubClient:
             raise GitHubError(200, path, "missing commit tree SHA")
         return tree_sha
 
-    def get_tree(self, repo: str, sha: str) -> dict:
-        """Read a recursive Git tree; callers check truncation."""
+    def get_tree(self, repo: str, sha: str, recursive: bool = True) -> dict:
+        """Read a Git tree, recursively by default; callers check truncation."""
         ref = urllib.parse.quote(sha, safe="")
-        path = f"/repos/{urllib.parse.quote(repo)}/git/trees/{ref}?recursive=1"
+        query = "?recursive=1" if recursive else ""
+        path = f"/repos/{urllib.parse.quote(repo)}/git/trees/{ref}{query}"
         return self._expect_dict(self._request("GET", path), path)
+
+    def create_orphan_commit(self, repo: str, files: dict[str, str], message: str) -> str:
+        """A parentless commit holding exactly `files` (git data API: blobs ->
+        tree -> commit) — the root of a branch that must not share the
+        default branch's tree. Returns its sha."""
+        quoted = urllib.parse.quote(repo)
+        entries = []
+        for name, content in sorted(files.items()):
+            blob_path = f"/repos/{quoted}/git/blobs"
+            blob = self._expect_dict(
+                self._request(
+                    "POST",
+                    blob_path,
+                    {"content": base64.b64encode(content.encode()).decode(), "encoding": "base64"},
+                ),
+                blob_path,
+            )
+            entries.append({"path": name, "mode": "100644", "type": "blob", "sha": blob["sha"]})
+        tree_path = f"/repos/{quoted}/git/trees"
+        tree = self._expect_dict(self._request("POST", tree_path, {"tree": entries}), tree_path)
+        commit_path = f"/repos/{quoted}/git/commits"
+        commit = self._expect_dict(
+            self._request(
+                "POST", commit_path, {"message": message, "tree": tree["sha"], "parents": []}
+            ),
+            commit_path,
+        )
+        sha = commit.get("sha")
+        if not isinstance(sha, str) or not sha:
+            raise GitHubError(200, commit_path, "no commit sha")
+        return sha
 
     def create_ref(self, repo: str, ref: str, sha: str) -> None:
         """Create a ref without replacing an existing ref."""

@@ -30,8 +30,32 @@ class LedgerWriteError(RuntimeError):
     """A ledger write could not finish; retain the operation for the next tick."""
 
 
+LEDGER_README = "README.md"
+_LEDGER_README_TEXT = (
+    "# Research log\n\n"
+    "Outerloop's record branch: benchmark progress (`BENCHMARKS.md`, `results/`),\n"
+    "run reports and the climb board. It shares no history with the code\n"
+    "branches; never merge it.\n"
+)
+
+
+def create_ledger_branch(github: GitHubClient, target: str, pinned_commit: str) -> None:
+    """Create the ledger branch as a PARENTLESS commit holding only a README.
+    It never carries the default branch's tree: the ledger needs only its own
+    files, and on a large repository GitHub truncates a recursive read of the
+    default branch's tree. The pin — the default-branch head the ledger
+    started beside — is recorded in the commit message."""
+    commit = github.create_orphan_commit(
+        target,
+        {LEDGER_README: _LEDGER_README_TEXT},
+        f"Start the research log (default branch at {pinned_commit})",
+    )
+    github.create_ref(target, f"refs/heads/{RESEARCH_LOG_BRANCH}", commit)
+
+
 def ensure_ledger_branch(github: GitHubClient, target: str, pinned_commit: str) -> None:
-    """Create an absent branch from the caller's pin, preserving an existing branch."""
+    """Create an absent ledger branch (create_ledger_branch), preserving an
+    existing branch."""
     if not pinned_commit:
         raise ValueError("branch creation requires a pinned commit")
     head = github.branch_head(target, RESEARCH_LOG_BRANCH)
@@ -40,10 +64,37 @@ def ensure_ledger_branch(github: GitHubClient, target: str, pinned_commit: str) 
     if head or github.dry_run:
         return
     try:
-        github.create_ref(target, f"refs/heads/{RESEARCH_LOG_BRANCH}", pinned_commit)
+        create_ledger_branch(github, target, pinned_commit)
     except GitHubError as exc:
         if not github.branch_head(target, RESEARCH_LOG_BRANCH):
             raise LedgerWriteError("could not create ledger branch") from exc
+
+
+def _complete_tree(tree: object) -> list[dict]:
+    if not isinstance(tree, dict) or tree.get("truncated") is not False:
+        raise LedgerReadError("incomplete ledger tree")
+    entries = tree.get("tree")
+    if not isinstance(entries, list):
+        raise LedgerReadError("malformed ledger tree")
+    return entries
+
+
+def ledger_paths(github: GitHubClient, target: str, head: str) -> list[dict]:
+    """The ledger's file entries at `head`, each with its full path: the
+    branch root's own files plus everything under `results/`. Read without a
+    recursive read of the whole branch — a ledger branch that carries a large
+    default branch's tree (older kernels created it from one) truncates that
+    read, and the ledger lives only in these few files."""
+    root = _complete_tree(github.get_tree(target, head, recursive=False))
+    paths = [item for item in root if item.get("type") == "blob"]
+    results = next(
+        (i for i in root if i.get("path") == "results" and i.get("type") == "tree"), None
+    )
+    if results is not None:
+        for item in _complete_tree(github.get_tree(target, results["sha"])):
+            if item.get("type") == "blob":
+                paths.append({**item, "path": f"results/{item['path']}"})
+    return paths
 
 
 def _read_at(
@@ -56,13 +107,8 @@ def _read_at(
     if not head:
         raise LedgerReadError("ledger branch does not exist; seed it from a pinned commit")
     try:
-        # A recursive tree avoids the contents API's silent 1,000-entry cap.
-        tree = github.get_tree(target, head)
-        if not isinstance(tree, dict) or tree.get("truncated") is not False:
-            raise LedgerReadError("incomplete ledger tree")
-        paths = tree["tree"]
-        if not isinstance(paths, list):
-            raise LedgerReadError("malformed ledger tree")
+        # Tree reads avoid the contents API's silent 1,000-entry cap.
+        paths = ledger_paths(github, target, head)
         leader: Ledger = {}
         pendings: Pendings = {}
         for item in paths:

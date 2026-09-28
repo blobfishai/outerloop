@@ -22,11 +22,6 @@ class MigrationGitHub(LedgerGitHub):
     def branch_sha(self, repo, branch):
         return PIN
 
-    def create_ref(self, repo, ref, sha):
-        assert ref == "refs/heads/research-log" and sha == PIN
-        self.ledger_head = sha
-        self.ledger_files = dict(self.ledger_snapshots[sha])
-
 
 def fake(*, absent=False):
     return MigrationGitHub(
@@ -49,7 +44,12 @@ def test_import_and_refuse_repeat(absent):
     assert entry.main_commit == PIN
     assert not entry.measured_sha
     assert "imported; provenance unknown" in table
-    assert gh.ledger_files["reports/keep.md"] == "keep"
+    if absent:
+        # created parentless: none of main's files (its reports) ride along
+        assert "reports/keep.md" not in gh.ledger_files
+        assert gh.orphans and PIN in gh.orphans[0][1]
+    else:
+        assert gh.ledger_files["reports/keep.md"] == "keep"
     assert gh.ledger_snapshots[PIN][LEADER_FILE] == SOURCE
     with pytest.raises(ValueError, match="already exists"):
         migrate(gh)

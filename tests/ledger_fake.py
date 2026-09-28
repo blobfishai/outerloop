@@ -6,6 +6,12 @@ from dataclasses import dataclass, field
 from outerloop.github import GitHubError
 
 
+def _blob(path: str, content: str) -> dict:
+    data = content.encode()
+    sha = hashlib.sha1(f"blob {len(data)}\0".encode() + data).hexdigest()
+    return {"path": path, "type": "blob", "sha": sha}
+
+
 @dataclass
 class LedgerGitHub:
     comments: list[dict] = field(default_factory=list)
@@ -18,6 +24,10 @@ class LedgerGitHub:
     commit_trees: dict[str, str] = field(default_factory=dict)
     ancestry: list[str] = field(default_factory=list)
     pull_requests: dict[int, dict] = field(default_factory=dict)
+    # a branch carrying a huge default-branch tree: GitHub truncates a
+    # RECURSIVE read of its root (subtree and non-recursive reads still work)
+    truncated_full_tree: bool = False
+    orphans: list[tuple[dict[str, str], str]] = field(default_factory=list)
 
     def default_branch(self, repo):
         return "main"
@@ -29,30 +39,40 @@ class LedgerGitHub:
         assert branch == "research-log"
         return self.ledger_head
 
+    def create_orphan_commit(self, repo, files, message):
+        sha = f"orphan-{len(self.orphans)}"
+        self.orphans.append((dict(files), message))
+        self.ledger_snapshots[sha] = dict(files)
+        return sha
+
     def create_ref(self, repo, ref, sha):
-        assert ref == "refs/heads/research-log" and sha == "main-pin"
+        # the ledger branch starts at a parentless commit, never a main pin
+        assert ref == "refs/heads/research-log" and sha.startswith("orphan-")
         self.ledger_head = sha
+        self.ledger_files = dict(self.ledger_snapshots[sha])
 
     def commit_tree(self, repo, sha):
         if sha not in self.commit_trees:
             raise GitHubError(404, "commit", "missing")
         return self.commit_trees[sha]
 
-    def get_tree(self, repo, sha):
+    def get_tree(self, repo, sha, recursive=True):
         if self.ledger_fail:
             raise GitHubError(503, "tree", "unavailable")
-        files = self.ledger_snapshots.get(sha, self.ledger_files)
+        commit, _, sub = sha.partition(":")
+        files = self.ledger_snapshots.get(commit, self.ledger_files)
+        if sub:
+            files = {p[len(sub) + 1 :]: c for p, c in files.items() if p.startswith(sub + "/")}
+        if recursive:
+            return {
+                "truncated": self.truncated_full_tree and not sub,
+                "tree": [_blob(p, c) for p, c in files.items()],
+            }
+        dirs = sorted({p.split("/", 1)[0] for p in files if "/" in p})
         return {
             "truncated": False,
-            "tree": [
-                {
-                    "path": p,
-                    "sha": hashlib.sha1(
-                        f"blob {len(content.encode())}\0".encode() + content.encode()
-                    ).hexdigest(),
-                }
-                for p, content in files.items()
-            ],
+            "tree": [_blob(p, c) for p, c in files.items() if "/" not in p]
+            + [{"path": d, "type": "tree", "sha": f"{commit}:{d}"} for d in dirs],
         }
 
     def get_file(self, repo, path, ref):
