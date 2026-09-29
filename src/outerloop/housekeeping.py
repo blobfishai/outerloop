@@ -148,3 +148,45 @@ def shed_ended_workspaces(
             ", ".join(shed),
         )
     return shed
+
+
+EVAL_SCRATCH_GRACE_S = 3600.0
+_EVAL_SCRATCH = re.compile(r"dispatch-eval-(\d+)")
+
+
+def shed_dead_eval_scratch(
+    tmp_root: Path, now: float, *, grace_s: float = EVAL_SCRATCH_GRACE_S
+) -> list[str]:
+    """Remove the scratch that a killed local eval left in ``$TMPDIR``.
+
+    dispatch.py's eval script keeps its tree in ``$TMPDIR/dispatch-eval-<shell
+    pid>`` and removes it from EXIT and TERM traps, but SIGKILL (a local
+    walltime kill, an out-of-memory or disk-full death) skips the traps. Slurm
+    purges the node's ``$SLURM_TMPDIR`` with the job; locally nothing did, and
+    one such tree held 3.3 GB. A directory goes only when its shell is gone (a
+    reused pid reads as alive, which keeps it) and it has been unchanged for
+    ``grace_s``. The eval's results live in its eval directory, never here.
+    """
+    removed: list[str] = []
+    for path in sorted(tmp_root.glob("dispatch-eval-*")):
+        match = _EVAL_SCRATCH.fullmatch(path.name)
+        if match is None or path.is_symlink() or not path.is_dir():
+            continue
+        try:
+            os.kill(int(match.group(1)), 0)
+            continue  # its shell lives
+        except ProcessLookupError:
+            pass
+        except (PermissionError, OverflowError, ValueError):
+            continue  # another user's live process, or no such pid form
+        try:
+            if now - path.stat().st_mtime < grace_s:
+                continue
+        except OSError:
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+        if not path.exists():
+            removed.append(path.name)
+    if removed:
+        log.info("removed %d dead eval scratch dir(s): %s", len(removed), ", ".join(removed))
+    return removed

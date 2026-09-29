@@ -1233,6 +1233,84 @@ def test_legacy_record_without_job_id_ends_only_past_deadline(tmp_path: Path) ->
     assert "past its run deadline" in load_record(tmp_path, "r-old").ending_note
 
 
+def _author_binding(
+    root: Path, run_id: str, *, pid: int, quiet_s: float, hostname: str = ""
+) -> None:
+    """The session binding a local climb's author leaves, its journal last written quiet_s ago."""
+    import os
+    import socket
+
+    from outerloop.runstate import run_dir as _run_dir
+
+    control = _run_dir(root, run_id) / "session-control"
+    control.mkdir(parents=True, exist_ok=True)
+    binding = {
+        "version": 1,
+        "generation": 1,
+        "backend": "claude-code",
+        "workspace": "/ws",
+        "home": "/home",
+        "session_id": "s",
+        "status": "running",
+        "hostname": hostname or socket.gethostname(),
+        "pid": pid,
+        "released": False,
+    }
+    (control / "binding.json").write_text(json.dumps(binding))
+    journal = control / "events-1.jsonl"
+    journal.write_text("")
+    os.utime(journal, (NOW - quiet_s, NOW - quiet_s))
+
+
+def _dead_group() -> int:
+    child = subprocess.Popen(["true"], start_new_session=True)  # its own group, gone once it exits
+    child.wait()
+    return child.pid
+
+
+def test_a_local_climb_whose_author_group_died_is_ended_once_its_journal_is_quiet(
+    tmp_path: Path,
+) -> None:
+    """A local climb records no job id, so only its author's process group can
+    show that it died. One killed by a disk-full event otherwise held its
+    workspace for the whole 24h deadline."""
+    _running_run(tmp_path, "r-local", job_id="", age_s=3600)
+    _author_binding(tmp_path, "r-local", pid=_dead_group(), quiet_s=GRACE + 60)
+    report, _ = run_tick(tmp_path, FakeSlurm(states={}))
+    assert report.running_ended == ("r-local",)
+    record = load_record(tmp_path, "r-local")
+    assert record.ending == "aborted"
+    assert "process group on this host exited" in record.ending_note
+
+
+def test_a_local_climb_is_left_alone_while_its_author_lives_journals_or_is_elsewhere(
+    tmp_path: Path,
+) -> None:
+    import os
+
+    _running_run(tmp_path, "r-alive", job_id="", age_s=3600)
+    _author_binding(tmp_path, "r-alive", pid=os.getpgrp(), quiet_s=GRACE + 60)  # a live group
+    _running_run(tmp_path, "r-fresh", job_id="", age_s=3600)
+    _author_binding(tmp_path, "r-fresh", pid=_dead_group(), quiet_s=5)  # may be recording it now
+    _running_run(tmp_path, "r-remote", job_id="", age_s=3600)
+    _author_binding(
+        tmp_path, "r-remote", pid=_dead_group(), quiet_s=GRACE + 60, hostname="another-host"
+    )
+    # an author that finished normally, while its climb measures the candidate
+    _running_run(tmp_path, "r-measuring", job_id="", age_s=3600)
+    _author_binding(tmp_path, "r-measuring", pid=_dead_group(), quiet_s=GRACE + 60)
+    from outerloop.runstate import run_dir as _run_dir
+
+    finished = _run_dir(tmp_path, "r-measuring") / "session-control" / "binding.json"
+    finished.write_text(
+        json.dumps({**json.loads(finished.read_text()), "status": "finished", "released": True})
+    )
+    report, _ = run_tick(tmp_path, FakeSlurm(states={}))
+    assert report.running_ended == ()
+    for run_id in ("r-alive", "r-fresh", "r-remote", "r-measuring"):
+        assert load_record(tmp_path, run_id).state == "running"
+
+
 def test_self_initiated_carries_contract_limits_into_the_job(tmp_path: Path) -> None:
     """The submitted climb job wears the contract's (clamped) limits: Slurm
     walltime from attempt_job_minutes, and the climb argv carries the session

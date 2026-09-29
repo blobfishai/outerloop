@@ -163,3 +163,29 @@ def test_forced_sweep_is_oldest_first_across_benchmark_prefixes(tmp_path: Path) 
     _run(root, "speedrun-20260903-063055-agent-03", ENDED, NOW - 100)  # newer
     shed = shed_ended_workspaces(root, NOW, force=True, limit=1)
     assert shed == ["tsp-20260820-201843"]  # the older id, though it sorts later lexically
+
+
+def test_dead_eval_scratch_goes_after_its_grace_while_live_fresh_or_foreign_dirs_stay(tmp_path):
+    import os
+    import subprocess
+
+    from outerloop.housekeeping import shed_dead_eval_scratch
+
+    def dead_pid() -> int:
+        child = subprocess.Popen(["true"])
+        child.wait()
+        return child.pid
+
+    now = 100_000.0
+    killed = tmp_path / f"dispatch-eval-{dead_pid()}"  # SIGKILLed: its traps never ran
+    (killed / "tree").mkdir(parents=True)
+    just_died = tmp_path / f"dispatch-eval-{dead_pid()}"  # its trap may be removing it right now
+    just_died.mkdir()
+    live = tmp_path / f"dispatch-eval-{os.getpid()}"  # a running eval
+    live.mkdir()
+    foreign = tmp_path / "dispatch-eval-results"  # not a pid: never ours to judge
+    foreign.mkdir()
+    for path, age in ((killed, 7200), (just_died, 10), (live, 7200), (foreign, 7200)):
+        os.utime(path, (now - age, now - age))
+    assert shed_dead_eval_scratch(tmp_path, now) == [killed.name]
+    assert not killed.exists() and just_died.exists() and live.exists() and foreign.exists()
