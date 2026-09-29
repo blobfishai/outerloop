@@ -42,7 +42,7 @@ from outerloop.compute import (
 )
 from outerloop.disk import DEFAULT_MIN_FREE_BYTES, check_disk
 from outerloop.harness import DEFAULT_MAX_TURNS, ClaudeModelUnset, default_claude_model, redact
-from outerloop.housekeeping import shed_ended_workspaces
+from outerloop.housekeeping import shed_dead_eval_scratch, shed_ended_workspaces
 from outerloop.job_names import run_job_name
 from outerloop.ledger_branch import RESEARCH_LOG_BRANCH as RESEARCH_LOG_BRANCH
 from outerloop.limits import EffectiveLimits, effective_limits
@@ -1465,6 +1465,34 @@ def _kill_stamp(root: Path, run_id: str) -> Path:
     return run_dir(root, run_id) / "attempt-terminal-seen"
 
 
+def _local_author_lost(root: Path, record: RunRecord, now: float, grace_s: float) -> bool:
+    """A local climb whose author died without an ending.
+
+    Its session binding says the author is launching or running on THIS host,
+    yet the author's process group is gone and its journal has been quiet for a
+    full grace (a live climb notices its author's exit and records it within
+    seconds). A binding from another host, one with no recorded process, or one
+    this tick cannot read is never evidence.
+    """
+    from outerloop.session_control import ControlError, _group_alive, read_binding
+
+    directory = run_dir(root, record.run_id)
+    try:
+        binding = read_binding(directory)
+        if binding is None or binding.status not in ("launching", "running"):
+            return False
+        if _group_alive(binding):
+            return False
+    except (ControlError, OSError):
+        return False
+    journal = directory / "session-control" / f"events-{binding.generation}.jsonl"
+    try:
+        quiet_since = journal.stat().st_mtime
+    except OSError:
+        quiet_since = record.updated or record.created
+    return now - quiet_since >= grace_s
+
+
 def _sweep_running(
     root: Path,
     compute: Compute,
@@ -1538,9 +1566,16 @@ def _sweep_running(
                 # terminal verdict; the shorter stranded window merely
                 # frees the picker lane and must not author endings.
                 deadline = record.deadline if record.deadline > 0 else (record.created + 24 * 3600)
-                if now < deadline:
+                if now >= deadline:
+                    note = "running with no recorded climb job, past its run deadline"
+                elif _local_author_lost(root, record, now, grace_s):
+                    # A LOCAL climb records no job id (SLURM_JOB_ID is unset),
+                    # so a killed one would otherwise hold its workspace for
+                    # the whole 24h deadline. Its author's process group on
+                    # this host is the evidence instead.
+                    note = "its author's process group on this host exited without an ending"
+                else:
                     continue
-                note = "running with no recorded climb job, past its run deadline"
             fresh = load_record(root, record.run_id)
             if fresh.state != RUNNING:
                 continue  # the climb landed its own ending meanwhile
@@ -1899,6 +1934,9 @@ def tick(
             if cannot_write
             else None,
         )
+        # Scratch a SIGKILLed local eval left behind: its cleanup traps never ran.
+        if shed_dead_eval_scratch(Path(os.environ.get("TMPDIR") or "/tmp"), now) and cannot_write:
+            disk_health = check_disk(root, min_free_bytes=min_free_bytes)
         if shed and cannot_write:
             disk_health = check_disk(root, min_free_bytes=min_free_bytes)
             write_heartbeat(root, now, disk=disk_health.as_dict())
