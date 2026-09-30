@@ -1,9 +1,10 @@
-# Parallel research with native subscriptions
+# Parallel research with native CLIs
 
 This fork adds `outerloop research`: give one goal to a bounded set of Claude
 Code and Codex workers, collect their answers, and resume their native sessions.
-Each worker uses an explicitly selected subscription login and model. Authentication
-failure stops that worker; there is no API-key fallback or account rotation.
+Each worker uses an explicitly selected authentication mode and model. Subscription
+login remains the default. API and Vertex require explicit plan fields; authentication
+failure stops that worker, without fallback or account rotation.
 
 This command produces research answers and execution receipts. The existing
 experiment scheduler, author/panel authentication, benchmark gates and publication
@@ -100,7 +101,11 @@ limit; Codex executes one native turn under the walltime limit. Provider quota
 errors are failures and are never retried using another credential.
 
 The root holds private plan, state, result and normalized event files outside each
-worker's directory. Raw auth responses and partial reasoning are not journaled.
+worker's directory. Each turn also retains the provider-emitted model/tool JSON
+events in `native-events.jsonl`, at mode0600 with a SHA256 and byte count in its
+state receipt. Known API credentials are redacted, and the transcript is bounded
+to64MiB. Auth-status responses and stderr are not journaled. Only events the
+native provider emits are available; this does not recover hidden reasoning.
 `status` reads these files without launching anything. Native IDs are persisted
 as soon as the CLI emits them, before the terminal response. Completion requires
 the terminal success event, a native identity, final text, and exit status zero.
@@ -160,3 +165,50 @@ Existing API-backed harness tests remain part of validation.
 
 Authentication references: [Claude Code](https://code.claude.com/docs/en/authentication)
 and [Codex](https://developers.openai.com/codex/auth/).
+
+## Explicit API and Vertex authentication
+
+For Claude API calls, create a dedicated writable native profile for session
+history, and mount or provision an owner-only0600 file containing the API key.
+Select these fields on the worker; keep the existing explicit model and prompt:
+
+```json
+{
+  "id": "researcher",
+  "backend": "claude",
+  "profile": "/private/native-profile",
+  "binary": "/absolute/path/to/claude",
+  "model": "YOUR_EXPLICIT_MODEL",
+  "auth_mode": "api-key",
+  "api_key_file": "/private/credential-file",
+  "workspace_id": "YOUR_WORKSPACE_ID",
+  "prompt": "Research the stated question using primary sources."
+}
+```
+
+Omit `workspace_id` for a workspace-scoped key. An organization-scoped key
+requires the actual workspace ID; the driver passes it in
+`ANTHROPIC_CUSTOM_HEADERS` as `anthropic-workspace-id`. The native CLI reads
+only the selected key file. Other ambient API credentials and alternate model
+endpoints remain excluded. Native auth status establishes the selected mode;
+model/workspace permission and quota are established by an actual native turn.
+
+Codex accepts explicit `auth_mode: "api-key"` with a private `api_key_file`,
+or a native profile previously authenticated through `codex login --with-api-key`.
+It runs with `forced_login_method="api"`. Neither API mode converts or copies a
+subscription login.
+
+For Claude on Vertex, select `auth_mode: "vertex"` and public coordinates:
+
+```json
+{"vertex":{"project":"YOUR_PROJECT","region":"global","adc_file":"","small_model":"YOUR_EXPLICIT_MODEL"}}
+```
+
+An empty `adc_file` uses service metadata/Workload Identity. An explicit file
+uses that ADC path, with no credential content in the plan. This mode retains
+the same persistent native session, containment and research tool policy; it
+does not force a Claude subscription login. Prepare the native executable and
+profile inside the actual Linux host/container. Changing auth mode, workspace,
+credential path or Vertex coordinates refuses resume rather than silently
+switching the conversation's provider. Do not commit any credential, native
+transcript or execution artifact.

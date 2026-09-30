@@ -1,4 +1,4 @@
-"""Bounded parallel research using explicitly selected native subscriptions."""
+"""Bounded parallel research using explicitly authenticated native CLIs."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from outerloop.harness import VertexConfig
 from outerloop.subscription import (
     ResearchError,
     SubscriptionHarness,
@@ -29,6 +30,14 @@ from outerloop.subscription import (
 Name = Annotated[str, Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")]
 
 
+class VertexSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    project: str
+    region: str = "global"
+    adc_file: str = ""
+    small_model: str = ""
+
+
 class Worker(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: Name
@@ -36,6 +45,10 @@ class Worker(BaseModel):
     profile: str
     binary: str
     model: str
+    auth_mode: str = "subscription"
+    api_key_file: str = ""
+    workspace_id: str = ""
+    vertex: VertexSettings | None = None
     prompt: Annotated[str, Field(min_length=1, max_length=200_000)]
 
 
@@ -63,6 +76,12 @@ class Plan(BaseModel):
                     Path(worker.profile),
                     str(Path(executable).resolve()),
                     worker.model,
+                    auth_mode=worker.auth_mode,
+                    api_key_file=worker.api_key_file,
+                    workspace_id=worker.workspace_id,
+                    vertex=VertexConfig(**worker.vertex.model_dump())
+                    if worker.vertex is not None
+                    else None,
                 )
             )
         if len({w.id for w in self.workers}) != len(self.workers):
@@ -137,11 +156,17 @@ def run_plan(plan: Plan, root: Path, parallel: int) -> dict:
     # must not silently choose another binary/account when a worker resumes.
     for worker, profile in zip(plan.workers, profiles, strict=True):
         worker.profile, worker.binary = str(profile.directory), profile.binary
+        worker.api_key_file = profile.api_key_file
     private_dir(root)
     root = root.resolve()
     with exclusive(root / "goal.lock"):
         saved_path = root / "plan.json"
-        manifest = {"schema": 1, "plan": plan.model_dump(), "parallel": parallel}
+        frozen_plan = plan.model_dump()
+        for worker in frozen_plan["workers"]:
+            if worker["auth_mode"] == "subscription":
+                for key in ("auth_mode", "api_key_file", "workspace_id", "vertex"):
+                    worker.pop(key)
+        manifest = {"schema": 1, "plan": frozen_plan, "parallel": parallel}
         if saved_path.exists():
             if load_state(saved_path) != manifest:
                 raise ResearchError("this root already belongs to another research plan")

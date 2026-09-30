@@ -1,8 +1,8 @@
-"""Native subscription workers behind the existing Harness protocol.
+"""Native CLI workers behind the existing Harness protocol.
 
 This is a local research adapter, not the unattended author/panel deployment.
-Profiles are operator-owned native logins; credentials are never copied, read
-into prompts, or converted to API keys. A persisted unfinished turn is refused
+Profiles select subscription, API or Vertex authentication explicitly; credentials
+never enter prompts or persisted plans. A persisted unfinished turn is refused
 on restart: absence of its controller is not evidence that its provider stopped.
 """
 
@@ -12,7 +12,9 @@ import contextlib
 import fcntl
 import hashlib
 import json
+import math
 import os
+import re
 import selectors
 import signal
 import subprocess
@@ -25,7 +27,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from outerloop.harness import SESSION_ENV_ALLOWLIST, SessionResult
+from outerloop.harness import SESSION_ENV_ALLOWLIST, SessionResult, VertexConfig, redact
 
 SCHEMA = 1
 MAX_LINE_BYTES = 2 * 1024 * 1024
@@ -118,6 +120,10 @@ class SubscriptionProfile:
     directory: Path
     binary: str
     model: str
+    auth_mode: str = "subscription"
+    api_key_file: str = ""
+    workspace_id: str = ""
+    vertex: VertexConfig | None = None
 
     def __post_init__(self) -> None:
         if self.backend not in {"claude", "codex"}:
@@ -128,6 +134,49 @@ class SubscriptionProfile:
         if not path.is_dir():
             raise ResearchError("subscription profile must be an existing native login directory")
         object.__setattr__(self, "directory", path)
+        if self.auth_mode not in {"subscription", "api-key", "vertex"}:
+            raise ResearchError("unsupported explicit native authentication mode")
+        if self.auth_mode == "vertex":
+            if self.backend != "claude" or self.vertex is None:
+                raise ResearchError(
+                    "Vertex authentication requires Claude and explicit coordinates"
+                )
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,199}", self.vertex.project):
+                raise ResearchError("invalid Vertex project")
+            if not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", self.vertex.region):
+                raise ResearchError("invalid Vertex region")
+        elif self.vertex is not None:
+            raise ResearchError("Vertex coordinates require explicit Vertex authentication")
+        if self.api_key_file:
+            if self.auth_mode != "api-key":
+                raise ResearchError("an API credential file requires explicit API authentication")
+            credential = Path(self.api_key_file).expanduser().resolve(strict=True)
+            if not credential.is_file() or credential.stat().st_mode & 0o077:
+                raise ResearchError("native API credential file must be private")
+            object.__setattr__(self, "api_key_file", str(credential))
+        if self.backend == "claude" and self.auth_mode == "api-key" and not self.api_key_file:
+            raise ResearchError("Claude API authentication requires a private credential file")
+        if self.workspace_id and (
+            self.backend != "claude"
+            or self.auth_mode != "api-key"
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,199}", self.workspace_id)
+        ):
+            raise ResearchError(
+                "workspace header requires Claude API authentication and a valid ID"
+            )
+
+    def authentication_identity(self) -> dict:
+        # Keep the legacy identity byte-compatible for subscription conversations.
+        if self.auth_mode == "subscription":
+            return {}
+        value: dict = {"auth_mode": self.auth_mode}
+        if self.api_key_file:
+            value["api_key_file"] = self.api_key_file
+        if self.workspace_id:
+            value["workspace_id"] = self.workspace_id
+        if self.vertex:
+            value["vertex"] = asdict(self.vertex)
+        return value
 
     def environment(self, home: Path) -> dict[str, str]:
         env = {key: os.environ[key] for key in SESSION_ENV_ALLOWLIST if key in os.environ}
@@ -150,12 +199,26 @@ class SubscriptionProfile:
             )
         else:
             env["CODEX_HOME"] = str(self.directory)
+        if self.auth_mode == "api-key" and self.api_key_file:
+            credential = Path(self.api_key_file)
+            if not credential.is_file() or credential.stat().st_mode & 0o077:
+                raise ResearchError("native API credential file must remain private")
+            key = credential.read_text().strip()
+            if not key or any(c in key for c in "\r\n"):
+                raise ResearchError("native API credential is missing or malformed")
+            env["ANTHROPIC_API_KEY" if self.backend == "claude" else "OPENAI_API_KEY"] = key
+            if self.workspace_id:
+                env["ANTHROPIC_CUSTOM_HEADERS"] = "anthropic-workspace-id: " + self.workspace_id
+        if self.auth_mode == "vertex":
+            assert self.vertex is not None
+            env.update(self.vertex.env())
         return env
 
     def auth_command(self) -> list[str]:
         if self.backend == "claude":
-            return [self.binary, *CLAUDE_ISOLATION, "auth", "status", "--json"]
-        return [self.binary, "-c", 'forced_login_method="chatgpt"', "login", "status"]
+            return [self.binary, *claude_isolation(self), "auth", "status", "--json"]
+        method = "api" if self.auth_mode == "api-key" else "chatgpt"
+        return [self.binary, "-c", f'forced_login_method="{method}"', "login", "status"]
 
     def check_auth(self, home: Path) -> None:
         """Use the native CLI; do not expose account metadata or credential files."""
@@ -179,16 +242,31 @@ class SubscriptionProfile:
                 auth = json.loads(stdout)
             except ValueError:
                 auth = {}
-            ok = (
-                isinstance(auth, dict)
-                and auth.get("loggedIn") is True
-                and auth.get("authMethod") == "claude.ai"
-                and auth.get("apiProvider") == "firstParty"
-            )
+            ok = isinstance(auth, dict) and auth.get("loggedIn") is True
+            if self.auth_mode == "vertex":
+                ok = ok and auth.get("apiProvider") == "vertex"
+            else:
+                expected = "api_key" if self.auth_mode == "api-key" else "claude.ai"
+                ok = (
+                    ok
+                    and auth.get("authMethod") == expected
+                    and auth.get("apiProvider") == "firstParty"
+                )
         else:
-            ok = "Logged in using ChatGPT" in stdout + stderr
+            expected = (
+                "Logged in using API key"
+                if self.auth_mode == "api-key"
+                else "Logged in using ChatGPT"
+            )
+            surface = (stdout + stderr).replace("using an API key", "using API key")
+            ok = expected in surface
         if process.returncode or not ok:
-            raise ResearchError(f"{self.backend}: subscription login required in selected profile")
+            label = (
+                "subscription login"
+                if self.auth_mode == "subscription"
+                else self.auth_mode + " authentication"
+            )
+            raise ResearchError(f"{self.backend}: {label} required in selected profile")
 
 
 CLAUDE_ISOLATION = [
@@ -200,6 +278,13 @@ CLAUDE_ISOLATION = [
     "--settings",
     '{"forceLoginMethod":"claudeai"}',
 ]
+
+
+def claude_isolation(profile: SubscriptionProfile) -> list[str]:
+    if profile.auth_mode == "subscription":
+        return CLAUDE_ISOLATION
+    # Retain isolation without forcing a subscription over an explicit API/ADC mode.
+    return [*CLAUDE_ISOLATION[:-2], "--settings", "{}"]
 
 
 def native_command(
@@ -215,7 +300,7 @@ def native_command(
         return [
             profile.binary,
             "--print",
-            *CLAUDE_ISOLATION,
+            *claude_isolation(profile),
             "--output-format",
             "stream-json",
             "--verbose",
@@ -236,7 +321,7 @@ def native_command(
             *(["--resume", session_id] if session_id else []),
         ]
     config = {
-        "forced_login_method": "chatgpt",
+        "forced_login_method": "api" if profile.auth_mode == "api-key" else "chatgpt",
         "model_provider": "openai",
         "model_reasoning_effort": "max",
         "approval_policy": "never",
@@ -350,6 +435,7 @@ class SubscriptionHarness:
             "model": self.profile.model,
             "workspace": str(workspace),
             "tools": self.tools,
+            **self.profile.authentication_identity(),
         }
         previous = load_state(record_path) if record_path.exists() else None
         if previous is not None:
@@ -396,6 +482,7 @@ class SubscriptionHarness:
         argv = native_command(self.profile, workspace, resume_id or "", self.tools, self.max_turns)
         watch_read, watch_write = os.pipe()
         done_read, done_write = os.pipe()
+        native_environment = self.profile.environment(home)
         try:
             process = subprocess.Popen(
                 [
@@ -407,7 +494,7 @@ class SubscriptionHarness:
                     *argv,
                 ],
                 cwd=workspace,
-                env=self.profile.environment(home),
+                env=native_environment,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -427,7 +514,10 @@ class SubscriptionHarness:
         try:
             record.update(status="running", pid=process.pid)
             persist()
-            result = self._stream(process, brief, record, turn_dir, persist, done_read)
+            secrets = tuple(
+                native_environment.get(k, "") for k in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
+            )
+            result = self._stream(process, brief, record, turn_dir, persist, done_read, secrets)
         finally:
             os.close(watch_write)  # supervisor observes EOF and kills the native group
             os.close(done_read)
@@ -440,7 +530,9 @@ class SubscriptionHarness:
         persist()
         return result
 
-    def _stream(self, process, brief, record, turn_dir, persist, done_read) -> SessionResult:
+    def _stream(
+        self, process, brief, record, turn_dir, persist, done_read, secrets=()
+    ) -> SessionResult:
         started = last_activity = time.monotonic()
         last_checkpoint = started
         buffers: dict[str, bytes] = {"stdout": b"", "stderr": b""}
@@ -451,18 +543,36 @@ class SubscriptionHarness:
         final = ""
         turns = 0
         native_returncode: int | None = None
+        provider_cost: float | None = None
         completion_bytes = b""
         events_path = turn_dir / "events.jsonl"
         event_fd = os.open(events_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        native_path = turn_dir / "native-events.jsonl"
+        try:
+            native_fd = os.open(native_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except BaseException:
+            os.close(event_fd)
+            raise
+        native_digest = hashlib.sha256()
+        native_bytes = 0
 
         def event(line: bytes) -> None:
-            nonlocal terminal, detail, final, turns, last_checkpoint
+            nonlocal terminal, detail, final, turns, last_checkpoint, native_bytes, provider_cost
             try:
                 data = json.loads(line)
             except (ValueError, UnicodeError):
                 return
             if not isinstance(data, dict):
                 return
+            original = (redact(line.decode(), secrets) + "\n").encode()
+            if native_bytes + len(original) > 64 * 1024 * 1024:
+                raise ResearchError("private native transcript exceeds size limit")
+            remaining_event = memoryview(original)
+            while remaining_event:
+                written = os.write(native_fd, remaining_event)
+                remaining_event = remaining_event[written:]
+            native_digest.update(original)
+            native_bytes += len(original)
             kind = data.get("type", "")
             native_id = ""
             if self.profile.backend == "claude":
@@ -472,8 +582,13 @@ class SubscriptionHarness:
                     terminal = data.get("subtype") == "success" and not data.get("is_error")
                     if not terminal:
                         detail = "provider did not report a successful result"
-                    final = str(data.get("result") or "")
+                    final = redact(str(data.get("result") or ""), secrets)
                     turns = data.get("num_turns", 0)
+                    cost = data.get("total_cost_usd")
+                    if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+                        if not math.isfinite(cost) or cost < 0:
+                            raise ResearchError("invalid provider cost receipt")
+                        provider_cost = float(cost)
             else:
                 if kind == "thread.started":
                     native_id = data.get("thread_id", "")
@@ -488,7 +603,7 @@ class SubscriptionHarness:
                     and isinstance(item, dict)
                     and item.get("type") == "agent_message"
                 ):
-                    final = str(item.get("text") or "")
+                    final = redact(str(item.get("text") or ""), secrets)
             if native_id:
                 if not isinstance(native_id, str) or len(native_id) > 200:
                     raise ResearchError("invalid native session identity")
@@ -512,6 +627,7 @@ class SubscriptionHarness:
                 or time.monotonic() - last_checkpoint >= 1
             ):
                 os.fsync(event_fd)
+                os.fsync(native_fd)
                 persist()  # native identity is durable while the turn is still live
                 last_checkpoint = time.monotonic()
 
@@ -610,8 +726,19 @@ class SubscriptionHarness:
         except ResearchError as exc:
             stop, detail = "protocol-error", str(exc)
         finally:
-            os.fsync(event_fd)
-            os.close(event_fd)
+            try:
+                os.fsync(event_fd)
+                os.fsync(native_fd)
+            finally:
+                os.close(event_fd)
+                os.close(native_fd)
+            record.update(
+                native_transcript_path=str(native_path),
+                native_transcript_sha256=native_digest.hexdigest(),
+                native_transcript_bytes=native_bytes,
+                provider_cost_usd=provider_cost,
+                provider_cost_status="reported" if provider_cost is not None else "unavailable",
+            )
         if not stop:
             stop = (
                 "completed"
@@ -621,7 +748,7 @@ class SubscriptionHarness:
         return SessionResult(
             stop_reason=stop,
             is_error=stop != "completed",
-            cost_usd=0.0,
+            cost_usd=provider_cost or 0.0,
             num_turns=turns if isinstance(turns, int) else 0,
             session_id=record["session_id"],
             final_text=final,
