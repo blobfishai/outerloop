@@ -205,7 +205,8 @@ For Claude on Vertex, select `auth_mode: "vertex"` and public coordinates:
 ```
 
 An empty `adc_file` uses service metadata/Workload Identity. An explicit file
-uses that ADC path, with no credential content in the plan. This mode retains
+is resolved from the preparation directory, including `~` expansion, and the
+absolute path is frozen with no credential content in the plan. This mode retains
 the same persistent native session, containment and research tool policy; it
 does not force a Claude subscription login. Prepare the native executable and
 profile inside the actual Linux host/container. Changing auth mode, workspace,

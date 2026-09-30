@@ -23,7 +23,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Iterator
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -145,6 +145,11 @@ class SubscriptionProfile:
                 raise ResearchError("invalid Vertex project")
             if not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", self.vertex.region):
                 raise ResearchError("invalid Vertex region")
+            if self.vertex.adc_file:
+                adc = Path(self.vertex.adc_file).expanduser().resolve(strict=True)
+                if not adc.is_file():
+                    raise ResearchError("Vertex credential path must be a regular file")
+                object.__setattr__(self, "vertex", replace(self.vertex, adc_file=str(adc)))
         elif self.vertex is not None:
             raise ResearchError("Vertex coordinates require explicit Vertex authentication")
         if self.api_key_file:
@@ -455,6 +460,9 @@ class SubscriptionHarness:
         # Authenticate before accepting a new turn. A failure preserves the last
         # completed result, so fixing login cannot erase recoverable history.
         self.profile.check_auth(home)
+        # Resolve credentials before accepting a turn or allocating liveness FDs.
+        # A key removed/changed after auth must preserve the completed conversation.
+        native_environment = self.profile.environment(home)
         generation = int(previous["generation"]) + 1 if previous else 1
         turn_dir = self.state_dir / f"turn-{generation:04d}"
         turn_dir.mkdir(mode=0o700)  # refuse an existing receipt, never overwrite
@@ -482,7 +490,6 @@ class SubscriptionHarness:
         argv = native_command(self.profile, workspace, resume_id or "", self.tools, self.max_turns)
         watch_read, watch_write = os.pipe()
         done_read, done_write = os.pipe()
-        native_environment = self.profile.environment(home)
         try:
             process = subprocess.Popen(
                 [

@@ -157,6 +157,8 @@ def run_plan(plan: Plan, root: Path, parallel: int) -> dict:
     for worker, profile in zip(plan.workers, profiles, strict=True):
         worker.profile, worker.binary = str(profile.directory), profile.binary
         worker.api_key_file = profile.api_key_file
+        if worker.vertex is not None and profile.vertex is not None:
+            worker.vertex.adc_file = profile.vertex.adc_file
     private_dir(root)
     root = root.resolve()
     with exclusive(root / "goal.lock"):

@@ -15,6 +15,8 @@ Versions follow [SemVer](https://semver.org).
   Private provider-emitted model/tool events now accompany the normalized event
   journal, with a digest, size bound and known-credential redaction. Provider
   cost is reported when present; missing cost is labelled unavailable.
+  Credential failures before launch preserve completed conversation state;
+  explicit Vertex credential paths are resolved before authentication and frozen.
   Upgrading: existing subscription plans and conversation identities retain
   their original representation and need no migration. API/Vertex conversations
   must start with an explicit new plan and cannot resume a subscription binding.

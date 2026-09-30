@@ -326,6 +326,99 @@ def test_vertex_coordinates_are_bound_and_cannot_change_on_resume(tmp_path):
         adapter.run("continue", workspace, result.session_id)
 
 
+def test_credential_change_after_auth_preserves_completed_turn_and_allocates_no_pipes(
+    tmp_path, monkeypatch
+):
+    original = fixture_profile(tmp_path, "claude", bad_auth=True)
+    key = tmp_path / "api-key"
+    key.write_text("fixture-key")
+    key.chmod(0o600)
+    profile = SubscriptionProfile(
+        "claude",
+        original.directory,
+        original.binary,
+        original.model,
+        auth_mode="api-key",
+        api_key_file=str(key),
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    adapter = SubscriptionHarness(profile, tmp_path / "state", timeout_s=4, idle_timeout_s=3)
+    first = adapter.run("first fixture request", workspace)
+    previous = (tmp_path / "state/state.json").read_bytes()
+    original_environment = SubscriptionProfile.environment
+    environment_calls = 0
+
+    def change_after_auth(selected, home):
+        nonlocal environment_calls
+        env = original_environment(selected, home)
+        environment_calls += 1
+        if environment_calls == 1:
+            key.chmod(0o644)
+        return env
+
+    pipe_calls = []
+    original_pipe = os.pipe
+
+    def count_pipe():
+        pipe_calls.append(True)
+        return original_pipe()
+
+    monkeypatch.setattr(SubscriptionProfile, "environment", change_after_auth)
+    monkeypatch.setattr(os, "pipe", count_pipe)
+    with pytest.raises(ResearchError, match="credential file must remain private"):
+        adapter.run("rejected continuation", workspace, first.session_id)
+    # Auth subprocess creates its own pipes; no additional liveness pipes exist.
+    auth_pipe_count = len(pipe_calls)
+    assert auth_pipe_count == 3
+    assert (tmp_path / "state/state.json").read_bytes() == previous
+    assert not (tmp_path / "state/turn-0002").exists()
+    assert len((profile.directory / "calls.jsonl").read_text().splitlines()) == 1
+    key.chmod(0o600)
+    monkeypatch.setattr(SubscriptionProfile, "environment", original_environment)
+    second = adapter.run("recovered continuation", workspace, first.session_id)
+    assert not second.is_error
+    assert load_state(tmp_path / "state/state.json")["generation"] == 2
+
+
+@pytest.mark.parametrize("filename", ["./adc.json", "~/adc.json"])
+def test_vertex_relative_adc_is_resolved_before_auth_and_frozen_plan(
+    tmp_path, monkeypatch, filename
+):
+    original = fixture_profile(tmp_path / "fixture", "claude", vertex=True)
+    adc = tmp_path / "adc.json"
+    adc.write_text("fixture-adc-not-an-actual-credential")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    plan = Plan(
+        goal="fixture Vertex paths",
+        tools="none",
+        timeout_s=4,
+        idle_timeout_s=3,
+        workers=[
+            Worker(
+                id="researcher",
+                backend="claude",
+                profile=str(original.directory),
+                binary=original.binary,
+                model=original.model,
+                prompt="fixture request",
+                auth_mode="vertex",
+                vertex={"project": "fixture-project", "adc_file": filename},
+            )
+        ],
+    )
+    root = tmp_path / "research"
+    assert run_plan(plan, root, 1)["complete"]
+    saved = load_state(root / "plan.json")
+    assert saved["plan"]["workers"][0]["vertex"]["adc_file"] == str(adc)
+    call = json.loads((original.directory / "calls.jsonl").read_text())
+    assert call["env"]["GOOGLE_APPLICATION_CREDENTIALS"] == str(adc)
+    assert "fixture-adc-not-an-actual-credential" not in json.dumps(saved)
+    assert run_plan(Plan.model_validate(saved["plan"]), root, 1)["complete"]
+    assert len((original.directory / "calls.jsonl").read_text().splitlines()) == 1
+
+
 def test_legacy_subscription_plan_remains_observation_only_after_upgrade(tmp_path):
     plan = plan_fixture(tmp_path)
     root = tmp_path / "research"
