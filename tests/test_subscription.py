@@ -13,7 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from outerloop.research_cli import Plan, Worker, resume, run_plan
+from outerloop.harness import VertexConfig
+from outerloop.research_cli import Plan, VertexSettings, Worker, resume, run_plan
 from outerloop.subscription import (
     ResearchError,
     SubscriptionHarness,
@@ -40,7 +41,7 @@ if "status" in sys.argv:
                 {
                     "loggedIn": True,
                     "authMethod": "api_key" if options.get("bad_auth") else "claude.ai",
-                    "apiProvider": "firstParty",
+                    "apiProvider": "vertex" if options.get("vertex") else "firstParty",
                 }
             )
         )
@@ -79,6 +80,14 @@ emit(
     if backend == "codex"
     else {"type": "system", "subtype": "init", "session_id": sid}
 )
+if options.get("rich_events"):
+    emit({"type": "assistant", "message": {"content": [{
+        "type": "tool_use", "id": "fixture-tool", "name": "Read",
+        "input": {"file_path": "fixture.txt"},
+    }]}})
+    emit({"type": "stream_event", "event": {"delta": {
+        "text": os.environ.get("ANTHROPIC_API_KEY", "fixture-text"),
+    }}})
 if options.get("conflict"):
     emit(
         {"type": "thread.started", "thread_id": "other"}
@@ -111,6 +120,7 @@ if not options.get("missing_terminal"):
                 "is_error": False,
                 "num_turns": 1,
                 "result": "verified answer",
+                **({"total_cost_usd": options["cost"]} if "cost" in options else {}),
             }
         )
 sys.exit(options.get("exit", 0))
@@ -220,7 +230,9 @@ def process_alive(pid: int) -> bool:
 
 @pytest.mark.parametrize("index", range(20))
 def test_timeout_kills_term_ignoring_descendants(tmp_path, index):
-    adapter, ws = harness(tmp_path, timeout=1, idle=0.3, child=True, hang=True)
+    # The test must reach child creation to exercise descendant cleanup, even
+    # when a busy host takes over 300ms to start its two Python processes.
+    adapter, ws = harness(tmp_path, timeout=3, idle=1, child=True, hang=True)
     result = adapter.run("brief", ws)
     assert result.stop_reason == "idle-timeout"
     pid = int((adapter.profile.directory / "child.pid").read_text())
@@ -240,6 +252,224 @@ def test_bad_auth_starts_no_model(tmp_path):
     with pytest.raises(ResearchError, match="subscription login required"):
         adapter.run("brief", ws)
     assert not (adapter.profile.directory / "calls.jsonl").exists()
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex"])
+def test_explicit_api_mode_resumes_and_does_not_store_the_credential(tmp_path, backend):
+    original = fixture_profile(tmp_path, backend, bad_auth=True, rich_events=True)
+    key = tmp_path / "api-key"
+    key.write_text("fixture-api-key-never-a-real-credential")
+    key.chmod(0o600)
+    profile = SubscriptionProfile(
+        backend,
+        original.directory,
+        original.binary,
+        original.model,
+        auth_mode="api-key",
+        api_key_file=str(key),
+        workspace_id="fixture-workspace" if backend == "claude" else "",
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    adapter = SubscriptionHarness(profile, tmp_path / "state", timeout_s=4, idle_timeout_s=3)
+    first = adapter.run("first fixture request", workspace)
+    second = adapter.run("continued fixture request", workspace, first.session_id)
+    assert not first.is_error and not second.is_error
+    state = load_state(tmp_path / "state/state.json")
+    assert state["generation"] == 2
+    assert state["identity"]["auth_mode"] == "api-key"
+    assert state["native_transcript_bytes"] > 0
+    import hashlib
+
+    transcript = Path(state["native_transcript_path"])
+    assert hashlib.sha256(transcript.read_bytes()).hexdigest() == state["native_transcript_sha256"]
+    assert '"tool_use"' in transcript.read_text()
+    for path in (tmp_path / "state").rglob("*.json*"):
+        assert key.read_text() not in path.read_text()
+        assert path.stat().st_mode & 0o077 == 0
+    if backend == "claude":
+        assert "[redacted]" in transcript.read_text()
+        assert (
+            profile.environment(tmp_path)["ANTHROPIC_CUSTOM_HEADERS"]
+            == "anthropic-workspace-id: fixture-workspace"
+        )
+        assert "forceLoginMethod" not in " ".join(native_command(profile, workspace, "", "none", 2))
+    else:
+        assert 'forced_login_method="api"' in native_command(profile, workspace, "", "none", 2)
+
+
+def test_vertex_coordinates_are_bound_and_cannot_change_on_resume(tmp_path):
+    original = fixture_profile(tmp_path, "claude", vertex=True)
+    profile = SubscriptionProfile(
+        "claude",
+        original.directory,
+        original.binary,
+        original.model,
+        auth_mode="vertex",
+        vertex=VertexConfig(project="fixture-project", region="global"),
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    adapter = SubscriptionHarness(profile, tmp_path / "state", timeout_s=4, idle_timeout_s=3)
+    result = adapter.run("fixture", workspace)
+    assert not result.is_error
+    assert profile.environment(tmp_path)["CLAUDE_CODE_USE_VERTEX"] == "1"
+    adapter.profile = SubscriptionProfile(
+        "claude",
+        original.directory,
+        original.binary,
+        original.model,
+        auth_mode="vertex",
+        vertex=VertexConfig(project="different-project", region="global"),
+    )
+    with pytest.raises(ResearchError, match="binding changed"):
+        adapter.run("continue", workspace, result.session_id)
+
+
+def test_credential_change_after_auth_preserves_completed_turn_and_allocates_no_pipes(
+    tmp_path, monkeypatch
+):
+    original = fixture_profile(tmp_path, "claude", bad_auth=True)
+    key = tmp_path / "api-key"
+    key.write_text("fixture-key")
+    key.chmod(0o600)
+    profile = SubscriptionProfile(
+        "claude",
+        original.directory,
+        original.binary,
+        original.model,
+        auth_mode="api-key",
+        api_key_file=str(key),
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    adapter = SubscriptionHarness(profile, tmp_path / "state", timeout_s=4, idle_timeout_s=3)
+    first = adapter.run("first fixture request", workspace)
+    previous = (tmp_path / "state/state.json").read_bytes()
+    original_environment = SubscriptionProfile.environment
+    environment_calls = 0
+
+    def change_after_auth(selected, home):
+        nonlocal environment_calls
+        env = original_environment(selected, home)
+        environment_calls += 1
+        if environment_calls == 1:
+            key.chmod(0o644)
+        return env
+
+    pipe_calls = []
+    original_pipe = os.pipe
+
+    def count_pipe():
+        pipe_calls.append(True)
+        return original_pipe()
+
+    monkeypatch.setattr(SubscriptionProfile, "environment", change_after_auth)
+    monkeypatch.setattr(os, "pipe", count_pipe)
+    with pytest.raises(ResearchError, match="credential file must remain private"):
+        adapter.run("rejected continuation", workspace, first.session_id)
+    # Auth subprocess creates its own pipes; no additional liveness pipes exist.
+    auth_pipe_count = len(pipe_calls)
+    assert auth_pipe_count == 3
+    assert (tmp_path / "state/state.json").read_bytes() == previous
+    assert not (tmp_path / "state/turn-0002").exists()
+    assert len((profile.directory / "calls.jsonl").read_text().splitlines()) == 1
+    key.chmod(0o600)
+    monkeypatch.setattr(SubscriptionProfile, "environment", original_environment)
+    second = adapter.run("recovered continuation", workspace, first.session_id)
+    assert not second.is_error
+    assert load_state(tmp_path / "state/state.json")["generation"] == 2
+
+
+@pytest.mark.parametrize("filename", ["./adc.json", "~/adc.json"])
+def test_vertex_relative_adc_is_resolved_before_auth_and_frozen_plan(
+    tmp_path, monkeypatch, filename
+):
+    original = fixture_profile(tmp_path / "fixture", "claude", vertex=True)
+    adc = tmp_path / "adc.json"
+    adc.write_text("fixture-adc-not-an-actual-credential")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    plan = Plan(
+        goal="fixture Vertex paths",
+        tools="none",
+        timeout_s=4,
+        idle_timeout_s=3,
+        workers=[
+            Worker(
+                id="researcher",
+                backend="claude",
+                profile=str(original.directory),
+                binary=original.binary,
+                model=original.model,
+                prompt="fixture request",
+                auth_mode="vertex",
+                vertex=VertexSettings(project="fixture-project", adc_file=filename),
+            )
+        ],
+    )
+    root = tmp_path / "research"
+    assert run_plan(plan, root, 1)["complete"]
+    saved = load_state(root / "plan.json")
+    assert saved["plan"]["workers"][0]["vertex"]["adc_file"] == str(adc)
+    call = json.loads((original.directory / "calls.jsonl").read_text())
+    assert call["env"]["GOOGLE_APPLICATION_CREDENTIALS"] == str(adc)
+    assert "fixture-adc-not-an-actual-credential" not in json.dumps(saved)
+    assert run_plan(Plan.model_validate(saved["plan"]), root, 1)["complete"]
+    assert len((original.directory / "calls.jsonl").read_text().splitlines()) == 1
+
+
+def test_legacy_subscription_plan_remains_observation_only_after_upgrade(tmp_path):
+    plan = plan_fixture(tmp_path)
+    root = tmp_path / "research"
+    run_plan(plan, root, 2)
+    saved = load_state(root / "plan.json")
+    assert all("auth_mode" not in w for w in saved["plan"]["workers"])
+    legacy_plan = Plan.model_validate(saved["plan"])
+    assert run_plan(legacy_plan, root, 2)["complete"]
+    assert all(
+        len((tmp_path / b / "profile/calls.jsonl").read_text().splitlines()) == 1
+        for b in ["codex", "claude"]
+    )
+
+
+def test_api_mode_rejects_world_readable_credentials_and_header_injection(tmp_path):
+    original = fixture_profile(tmp_path, "claude")
+    key = tmp_path / "key"
+    key.write_text("fixture-api-key")
+    key.chmod(0o644)
+    with pytest.raises(ResearchError, match="private"):
+        SubscriptionProfile(
+            "claude",
+            original.directory,
+            original.binary,
+            original.model,
+            auth_mode="api-key",
+            api_key_file=str(key),
+        )
+    key.chmod(0o600)
+    with pytest.raises(ResearchError, match="workspace header"):
+        SubscriptionProfile(
+            "claude",
+            original.directory,
+            original.binary,
+            original.model,
+            auth_mode="api-key",
+            api_key_file=str(key),
+            workspace_id="fixture\nInjected: header",
+        )
+
+
+def test_provider_cost_is_reported_and_missing_cost_is_not_called_free(tmp_path):
+    adapter, workspace = harness(tmp_path / "reported", "claude", cost=1.25)
+    result = adapter.run("fixture", workspace)
+    assert result.cost_usd == 1.25
+    assert load_state(tmp_path / "reported/state/state.json")["provider_cost_status"] == "reported"
+    adapter, workspace = harness(tmp_path / "unknown", "claude")
+    adapter.run("fixture", workspace)
+    state = load_state(tmp_path / "unknown/state/state.json")
+    assert state["provider_cost_usd"] is None
+    assert state["provider_cost_status"] == "unavailable"
 
 
 def test_profile_and_workspace_exclusion(tmp_path):
