@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from outerloop.harness import VertexConfig
-from outerloop.research_cli import Plan, Worker, resume, run_plan
+from outerloop.research_cli import Plan, VertexSettings, Worker, resume, run_plan
 from outerloop.subscription import (
     ResearchError,
     SubscriptionHarness,
@@ -404,7 +404,7 @@ def test_vertex_relative_adc_is_resolved_before_auth_and_frozen_plan(
                 model=original.model,
                 prompt="fixture request",
                 auth_mode="vertex",
-                vertex={"project": "fixture-project", "adc_file": filename},
+                vertex=VertexSettings(project="fixture-project", adc_file=filename),
             )
         ],
     )
