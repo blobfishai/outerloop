@@ -8,6 +8,14 @@ Versions follow [SemVer](https://semver.org).
 
 ### Added
 
+- `OUTERLOOP_CODEX_CONFIG` supplies the default for the climb's
+  `--codex-config`: codex `-c KEY=VALUE` overrides separated by `;` (a TOML
+  value may hold commas). It is on the tick's `.env` allowlist, and the tick
+  forwards it to every climb and wake job as `--codex-config` flags, which
+  replace a job's own environment default. A malformed value refuses a Codex
+  author on the tick host before anything is queued, and fails only jobs that
+  start a Codex session. Upgrading: `wake-spec.json` gains a `codex_config`
+  field; older kernels ignore it, and a spec without it loads as before.
 - Native research plans can explicitly select Claude/Codex API authentication
   or Claude on Vertex, alongside the existing subscription mode. Public
   authentication coordinates belong to the persistent conversation identity;

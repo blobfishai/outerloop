@@ -498,7 +498,12 @@ author key file is
 `OUTERLOOP_CODEX_KEY_FILE`; `init` writes the key to
 `~/.config/outerloop/<backend>_key`, 0600). A Codex author always runs contained,
 so it also needs the image
-(`OUTERLOOP_IMAGE`) and a Codex model in `OUTERLOOP_AUTHOR_MODEL`. On a
+(`OUTERLOOP_IMAGE`) and a Codex model in `OUTERLOOP_AUTHOR_MODEL`.
+`OUTERLOOP_CODEX_CONFIG` passes codex `-c KEY=VALUE` overrides to the Codex
+author, separated by `;` because a TOML value may hold commas (for example
+`use_legacy_landlock=true;model_reasoning_effort=high`). The tick forwards it to
+every climb and wake job; a malformed value stops a Codex author before the tick
+queues anything. On a
 cluster, evals run inside the Apptainer image at `OUTERLOOP_IMAGE` (default
 `~/outerloop-images/agent-py312.sif`) in a jail that binds only the
 checked-out tree — an eval that needs data must fetch it into the tree, and

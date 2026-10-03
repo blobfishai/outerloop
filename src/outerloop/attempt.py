@@ -96,7 +96,14 @@ from outerloop.panel import PanelLens, PanelVerdict, run_panel
 from outerloop.paths import CONFIG_DIR
 from outerloop.progress import fmt_metric
 from outerloop.review import PullRequest
-from outerloop.role_runner import build_harness, role_key
+from outerloop.role_runner import (
+    CODEX_CONFIG_ENV,
+    build_harness,
+    codex_config_args,
+    codex_config_entries,
+    codex_config_from_text,
+    role_key,
+)
 from outerloop.roles import author_spec
 from outerloop.rolespec import RoleSpec
 from outerloop.runstate import (
@@ -198,6 +205,23 @@ def codex_author_config_error(backend: str, model: str, image: str) -> str:
             f"(e.g. gpt-5.6-terra), not a claude model or none (got {model!r})"
         )
     return ""
+
+
+def _resolve_codex_config(
+    flags: list[str] | None, env_name: str = CODEX_CONFIG_ENV, flag: str = "--codex-config"
+) -> tuple[tuple[str, ...], str]:
+    """`(codex argv, error)` for one codex config: the flags when any were
+    given, else the environment setting. A malformed value comes back as an
+    error (and no argv) for the caller to raise where a codex session needs it."""
+    try:
+        entries = (
+            codex_config_entries(flags, flag)
+            if flags is not None
+            else codex_config_from_text(os.environ.get(env_name, ""), env_name)
+        )
+    except ValueError as exc:
+        return (), str(exc)
+    return codex_config_args(entries), ""
 
 
 def fleet_author_model(backend: str) -> str:
@@ -5071,10 +5095,12 @@ def main() -> int:
     parser.add_argument(
         "--codex-config",
         action="append",
-        default=[],
+        default=None,
         metavar="KEY=VALUE",
         help="codex `-c KEY=VALUE` config for the codex author (repeatable), "
-        "e.g. --codex-config use_legacy_landlock=true for a host that needs it.",
+        "e.g. --codex-config use_legacy_landlock=true for a host that needs it. "
+        "Default: OUTERLOOP_CODEX_CONFIG, entries separated by ';' (the tick "
+        "forwards it to climb and wake jobs); any flag replaces that default.",
     )
     parser.add_argument("--max-turns", type=int, default=60)
     parser.add_argument("--session-minutes", type=int, default=60)
@@ -5139,8 +5165,13 @@ def main() -> int:
     # fresh climb on args (below), a wake on the parked run's persisted pair — not
     # here, where args.author_backend is the FLEET default and would misjudge a
     # resume after a fleet flip.
-    # each --codex-config KEY=VALUE becomes a `-c KEY=VALUE` pair for codex
-    codex_extra = tuple(a for c in args.codex_config for a in ("-c", c))
+    # each --codex-config KEY=VALUE becomes a `-c KEY=VALUE` pair for codex. A
+    # malformed value fails only a job that runs a codex session: a wake of a
+    # claude run must not die (and count toward STUCK) on a codex setting.
+    codex_extra, codex_config_error = _resolve_codex_config(args.codex_config)
+    args.codex_extra, args.codex_config_error = codex_extra, codex_config_error
+    if codex_config_error:
+        log.warning("%s; a codex session in this job refuses to start", codex_config_error)
 
     bot_auth = resolve_bot_auth(args.pat_file, args.github_app_file)
 
@@ -5193,6 +5224,8 @@ def main() -> int:
         if args.key_file:
             wake_key_file = os.path.expanduser(args.key_file)
         _err = codex_author_config_error(wake_backend, wake_model, args.image)
+        if not _err and wake_backend == "codex":
+            _err = codex_config_error
         if _err:
             # this wake job HOLDS the run's lease (transferred on dispatch); release
             # it before exiting so a misconfig doesn't strand the run until the TTL
@@ -5298,6 +5331,8 @@ def main() -> int:
     # a fresh climb authors on the FLEET's configured backend; validate it (codex
     # writes+executes, so --image + a non-claude model) before any spend.
     _err = codex_author_config_error(args.author_backend, args.model, args.image)
+    if not _err and args.author_backend == "codex":
+        _err = codex_config_error
     if _err:
         parser.error(_err)
     # config-driven: the author key defaults per backend (claude vs codex) so the

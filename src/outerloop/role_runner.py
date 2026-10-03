@@ -17,6 +17,8 @@ post — the result-policy (kernel) acts on the RoleResult.
 from __future__ import annotations
 
 import logging
+import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -65,6 +67,44 @@ _HERMES_PROVIDERS = {
     "openrouter": ("openrouter", "OPENROUTER_API_KEY"),
     "openai": ("openai-api", "OPENAI_API_KEY"),
 }
+
+
+# Codex `-c KEY=VALUE` overrides for the codex sessions a climb starts. The
+# environment form (`OUTERLOOP_CODEX_CONFIG`) separates entries with ";" or a
+# newline, never a comma: a codex value is TOML and may itself hold commas
+# (an array, an inline table). A key is a dotted path of plain names, so an
+# entry can never be read as another codex flag.
+CODEX_CONFIG_ENV = "OUTERLOOP_CODEX_CONFIG"
+_CODEX_CONFIG_KEY = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*")
+
+
+def codex_config_entries(entries: Iterable[str], source: str = "--codex-config") -> tuple[str, ...]:
+    """Validated codex config overrides, in order (codex applies them in order,
+    so a later entry for the same key wins). Blank entries are dropped; an
+    entry that is not `KEY=VALUE` raises ValueError naming `source`."""
+    out: list[str] = []
+    for raw in entries:
+        entry = raw.strip()
+        if not entry:
+            continue
+        key, sep, _ = entry.partition("=")
+        if not sep or not _CODEX_CONFIG_KEY.fullmatch(key.strip()):
+            raise ValueError(
+                f"{source}: {entry[:80]!r} is not a codex KEY=VALUE override "
+                "(KEY is a dotted path such as model_providers.local.base_url)"
+            )
+        out.append(f"{key.strip()}={entry[len(key) + 1 :]}")
+    return tuple(out)
+
+
+def codex_config_from_text(raw: str, source: str = CODEX_CONFIG_ENV) -> tuple[str, ...]:
+    """Entries from the environment form: separated by ";" or newlines."""
+    return codex_config_entries(re.split(r"[;\n]", raw), source)
+
+
+def codex_config_args(entries: Iterable[str]) -> tuple[str, ...]:
+    """The codex argv for validated entries: one `-c KEY=VALUE` pair each."""
+    return tuple(arg for entry in entries for arg in ("-c", entry))
 
 
 def role_key(key_file: str | Path, backend: str = "claude") -> str:

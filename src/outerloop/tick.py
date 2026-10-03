@@ -244,6 +244,10 @@ class ServiceSpec:
     # here (see MAX_ATTEMPT_JOB_MINUTES). Raise together with job_partition.
     max_job_minutes: int = MAX_ATTEMPT_JOB_MINUTES
     qos: str = ""
+    # OUTERLOOP_CODEX_CONFIG as the tick read it: codex `-c KEY=VALUE`
+    # overrides, ";"-separated, forwarded to every climb and wake job as
+    # --codex-config flags (a job's flags win over its own environment).
+    codex_config: str = ""
 
 
 # Generous vs the ~2 h job walltimes plus queue wait, tight enough that
@@ -2428,6 +2432,20 @@ def _climb_panel_argv(spec: ServiceSpec) -> list[str]:
     return argv
 
 
+def _codex_config_argv(spec: ServiceSpec) -> list[str]:
+    """--codex-config flags carrying the tick's OUTERLOOP_CODEX_CONFIG to a
+    climb or wake job. A malformed value forwards nothing: the job then reads
+    its own environment and fails only if it runs a codex session, and the
+    launch preflight below refuses a codex author on it."""
+    from outerloop.role_runner import codex_config_from_text
+
+    try:
+        entries = codex_config_from_text(spec.codex_config)
+    except ValueError:
+        return []
+    return [arg for entry in entries for arg in ("--codex-config", entry)]
+
+
 def _author_config_error(spec: ServiceSpec) -> str:
     """Why the config-driven author would die at the climb's startup ("" when it
     won't), checked on the tick host BEFORE a claim/submit so a codex misconfig
@@ -2435,13 +2453,20 @@ def _author_config_error(spec: ServiceSpec) -> str:
     strands a claimed intake issue. Reads the fleet author config from env — the
     same source the climb defaults from — and the image the tick already knows."""
     from outerloop.attempt import codex_author_config_error, fleet_author_model
+    from outerloop.role_runner import codex_config_from_text
 
     backend = os.environ.get("OUTERLOOP_AUTHOR_BACKEND") or "claude"
     try:
         model = fleet_author_model(backend)
     except ClaudeModelUnset as exc:
         return str(exc)
-    return codex_author_config_error(backend, model, spec.image)
+    error = codex_author_config_error(backend, model, spec.image)
+    if not error and backend == "codex":
+        try:
+            codex_config_from_text(spec.codex_config)
+        except ValueError as exc:
+            return str(exc)
+    return error
 
 
 def _same_key(a: Path, b: Path) -> bool:
@@ -2795,6 +2820,7 @@ def service_self_initiated(
             slot_agent,
             *_climb_limit_argv(limits, job_minutes),
             *_climb_panel_argv(spec),
+            *_codex_config_argv(spec),
         ]
         if spec.pat_file:
             argv += ["--pat-file", spec.pat_file]
@@ -3088,6 +3114,7 @@ def service_intake(
             hypothesis_b64,
             *_climb_limit_argv(limits, job_minutes),
             *_climb_panel_argv(spec),
+            *_codex_config_argv(spec),
         ]
         if spec.pat_file:
             argv += ["--pat-file", spec.pat_file]
@@ -3177,6 +3204,9 @@ class JobWakeDispatcher:
             # the wake runs the SAME verification panel as the fresh climb, so a
             # dispatched improvement is verified before it is published.
             *_climb_panel_argv(self.spec),
+            # a resumed codex session runs with the fleet's codex config, like
+            # its binary and image (deployment settings, not run state)
+            *_codex_config_argv(self.spec),
             # session budget for the depth-axis REVISION (a blocking panel
             # finding wakes the author to revise).
             "--max-turns",
@@ -3427,6 +3457,7 @@ def _service_spec_from_env(root: Path) -> tuple[Any, ServiceSpec | None]:
                 gpu_account=os.environ.get("OUTERLOOP_GPU_ACCOUNT", ""),
                 max_job_minutes=_max_job_minutes_from_env(),
                 has_lanes=compute_from_env().has_lanes,
+                codex_config=os.environ.get("OUTERLOOP_CODEX_CONFIG", ""),
             )
             return github, service_spec
         except Exception as exc:
