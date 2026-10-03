@@ -84,6 +84,43 @@ def test_env_file_values_refuses_a_writable_file(tmp_path: Path, mode: int) -> N
         env_file_values(path)
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "plain",
+        '"double"',
+        "'single'",
+        'model_provider="local"',  # a TOML string at the end keeps its closing quote
+        '"model_provider="local""',  # a quoted value whose own value is quoted
+        "'a=\"x\";b=2'",
+        "\"mismatched'",
+        '"',
+        "",
+        "x\r",  # a CRLF-edited file
+    ],
+)
+def test_deploy_and_start_read_a_value_alike(tmp_path: Path, value: str) -> None:
+    """The chain's deploy step (bash) and `outerloop start` (python) read one
+    .env; they must unquote a value the same way, or a codex override like
+    `model_provider="local"` reaches a cluster tick without its closing quote."""
+    import subprocess
+
+    sh = (REPO / "scripts" / "tick_deploy.sh").read_text()
+    m = re.search(r"^env_value\(\) \{\n.*?^\}\n", sh, re.S | re.M)
+    assert m is not None
+    snippet = tmp_path / "env_value.sh"
+    snippet.write_text(m.group(0))
+    line = f"OUTERLOOP_CODEX_CONFIG={value}"
+    bash = subprocess.run(
+        ["bash", "-c", f'. "{snippet}"; _line="$1"; env_value; printf %s "$_v"', "_", line],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    python = env_file_values(env_file(tmp_path, line + "\n"), ("OUTERLOOP_CODEX_CONFIG",))
+    assert bash == python["OUTERLOOP_CODEX_CONFIG"]
+
+
 def test_tick_env_keys_match_the_deploy_allowlist() -> None:
     """The local loop exports the same author knobs the chain's deploy step
     does; the two lists must not drift."""

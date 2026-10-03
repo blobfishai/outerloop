@@ -35,11 +35,16 @@ env_line() {
     _line=$(grep -E "^${_k}=" "$ENV_FILE" 2>/dev/null | tail -1)
 }
 # env_value: the value of $_line into $_v — the CR of a CRLF-edited file and
-# one pair of surrounding quotes stripped
+# one MATCHING pair of surrounding quotes stripped, as `outerloop start` reads
+# the file. A lone quote at either end is part of the value: a codex override
+# such as model_provider="local" must keep its closing quote.
 env_value() {
     _v=${_line#*=}
     _v=${_v%$'\r'}
-    _v=${_v#[\"\']}; _v=${_v%[\"\']}
+    case "$_v" in
+        \"*\") _v=${_v#\"}; _v=${_v%\"} ;;
+        \'*\') _v=${_v#\'}; _v=${_v%\'} ;;
+    esac
 }
 
 # --- 2. deploy: move the checkout per the update policy, sync deps ---

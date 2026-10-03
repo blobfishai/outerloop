@@ -44,6 +44,10 @@ Versions follow [SemVer](https://semver.org).
 
 ### Fixed
 
+- The chain's deploy step strips quotes from a `.env` value only when they
+  form a matching pair, as `outerloop start` does. It removed a lone trailing
+  quote, so a value ending in a TOML string, such as the codex override
+  `model_provider="local"`, reached a cluster tick without its closing quote.
 - An author waking before its first PR refreshes its measurement base and
   contract along with submission freshness. Folding an upstream improvement
   can no longer pass preflight while comparing against the old baseline.
