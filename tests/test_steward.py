@@ -774,3 +774,34 @@ def test_steward_auto_publish_does_not_arm(tmp_path, steward_repo, monkeypatch):
     )
     assert outcome.outcome == "stewarded"
     assert not github.armed
+
+
+def test_stewardship_can_keep_session_text_off_github(tmp_path, steward_repo, monkeypatch) -> None:
+    monkeypatch.setenv("OUTERLOOP_POST_TRANSCRIPTS", "off")
+    outcome, github, _ = run_steward(
+        tmp_path, edits={"src/pilot/instances.py": "POOL_SEED = 'per-run'\n"}
+    )
+    assert outcome.outcome == "stewarded"
+    body = github.prs[0]["body"]
+    assert "instances resample per run" not in body
+    assert "OUTERLOOP_POST_TRANSCRIPTS=off" in body and "measured by the orchestrator" in body
+    (_, issue_report), *_ = [c for c in github.issue_comments if c[0] == 21][-1:]
+    assert "instances resample per run" not in issue_report
+    report = (tmp_path / "state" / "runs" / "steward-tsp-1" / "report.md").read_text()
+    assert "instances resample per run" in report  # the local record keeps it
+
+
+def test_a_no_change_stewardship_keeps_session_text_off_github(
+    tmp_path, steward_repo, monkeypatch
+) -> None:
+    from outerloop.posting import withhold_session_text
+
+    monkeypatch.setenv("OUTERLOOP_POST_TRANSCRIPTS", "off")
+    outcome, github, _ = run_steward(tmp_path, edits={})
+    assert outcome.outcome == "no-change"
+    (_, issue_report), *_ = [c for c in github.issue_comments if c[0] == 21][-1:]
+    assert "instances resample per run" not in issue_report
+    assert "OUTERLOOP_POST_TRANSCRIPTS=off" in issue_report
+    report = (tmp_path / "state" / "runs" / "steward-tsp-1" / "report.md").read_text()
+    assert "instances resample per run" in report  # local
+    assert "instances resample per run" not in withhold_session_text(report)  # archived

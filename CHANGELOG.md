@@ -41,6 +41,20 @@ Versions follow [SemVer](https://semver.org).
   but `author_backend` may now be `hermes`; an older kernel's wake refuses that
   backend and hands the lease back, so drain hermes-authored runs before rolling
   back.
+- `OUTERLOOP_POST_TRANSCRIPTS=off` keeps session text off GitHub, for a
+  private target or sessions that read material that must stay on the
+  deployment's hosts. Pull requests and their edits, issue reports (climb and
+  steward), archived `research-log` reports, and the climb board and status
+  strip carry the measured results, what ran, the panel's outcome and a note
+  instead of the author's report, the judges' transcripts, the author's launch
+  notes and a withdrawal reason; the pushed commit's subject no longer quotes
+  the report. The run's local records keep the text. The switch fails closed:
+  only an empty value, `1`, `on`, `true` or `yes` post the text. It is on the
+  tick's `.env` allowlist. Replies to review comments, pushed code and a
+  research line's notebook are not covered (docs/install.md). Upgrading:
+  unset, nothing changes; an older kernel ignores the setting and posts the
+  text, and jobs queued before it is set keep the environment they were
+  submitted with.
 - Native research plans can explicitly select Claude/Codex API authentication
   or Claude on Vertex, alongside the existing subscription mode. Public
   authentication coordinates belong to the persistent conversation identity;
@@ -56,6 +70,14 @@ Versions follow [SemVer](https://semver.org).
 
 ### Fixed
 
+- A credential rotated while a run is live is redacted from what the kernel
+  posts. `FileTokenProvider` re-reads its file on every call, but each run's
+  redaction set was a snapshot taken at start, so a rewritten PAT or key could
+  reach a pull request body or a posted report. Every value a token provider
+  reads now joins a process-wide set that `redact` consults at write time, as
+  it already did for minted App tokens, and `GitHubClient` passes every posted
+  body, title, commit message and file text through that redaction just before
+  sending, after reading the credential it is about to use.
 - The chain's deploy step strips quotes from a `.env` value only when they
   form a matching pair, as `outerloop start` does. It removed a lone trailing
   quote, so a value ending in a TOML string, such as the codex override

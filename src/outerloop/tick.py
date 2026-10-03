@@ -1344,6 +1344,11 @@ def service_research_log(
             report = report_path.read_text()
         except OSError:
             continue
+        from outerloop.posting import transcripts_posted, withhold_session_text
+
+        if not transcripts_posted():
+            # the archive is on GitHub: the session's text stays local
+            report = withhold_session_text(report)
         outcome = record.ending or ("improved" if record.state == PARKED else "ended")
         if _publish_ledger_entry(github, spec.target, root, record, outcome, report, marker, state):
             published += 1

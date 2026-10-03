@@ -95,6 +95,7 @@ from outerloop.orchestrator import (
 )
 from outerloop.panel import PanelLens, PanelVerdict, run_panel
 from outerloop.paths import CONFIG_DIR
+from outerloop.posting import TRANSCRIPT_WITHHELD, panel_summary, transcripts_posted
 from outerloop.progress import fmt_metric
 from outerloop.review import PullRequest
 from outerloop.role_runner import (
@@ -3252,7 +3253,7 @@ def resume_run(
             run_id,
             NEGATIVE_RESULT,
             "",
-            result.report(config, redact_secrets=secrets)[:8000],
+            result.report(config, redact_secrets=secrets, transcripts=transcripts_posted())[:8000],
             secrets,
         )
         drop_snapshot(ws, Snapshot(commit=candidate_sha, tree="", ref=candidate_ref))
@@ -3758,7 +3759,7 @@ def _finish_attempt(
         run_id,
         result.outcome,
         record.pr_url,
-        result.report(config, redact_secrets=secrets)[:8000],
+        result.report(config, redact_secrets=secrets, transcripts=transcripts_posted())[:8000],
         secrets,
     )
     return AttemptOutcome(
@@ -3844,6 +3845,8 @@ def publish(
     snapshot_attempted: bool = False,
 ) -> AttemptOutcome:
     """Publish a credited sealed tree: open a PR or fast-forward its head."""
+    # session text on GitHub is the deployment's call (OUTERLOOP_POST_TRANSCRIPTS)
+    posted = transcripts_posted()
     latest = load_record(run_root, run_id)
     if latest.state == ENDED:
         return AttemptOutcome(run_id=run_id, outcome="publish-refused", pr_url=latest.pr_url)
@@ -4045,7 +4048,9 @@ def publish(
                     )
                 assert result.candidate is not None
                 title = (result.submit_report or "").splitlines()
-                summary = redact(title[0].strip(), secrets) if title else ""
+                # the author's first line names the commit, unless session
+                # text stays off GitHub
+                summary = redact(title[0].strip(), secrets) if title and posted else ""
                 try:
                     # The newest base commit the sealed candidate holds: its pin,
                     # or a later base the author folded, never an unseen tip.
@@ -4205,11 +4210,20 @@ def publish(
                 lambda: github.mark_ready_for_review(record.target, number, pushed_sha),
                 secrets,
             )
+        panel_text = (
+            redact(result.panel_transcript[:MAX_REPORT_BODY], secrets)
+            if posted
+            else panel_summary(
+                result.panel_rounds, result.panel_blocking_open, result.panel_degraded
+            )
+        )
         panel_section = (
-            "\n\n## Pre-PR verification\n\n"
-            + redact(result.panel_transcript[:MAX_REPORT_BODY], secrets)
-            if result.panel_transcript
-            else ""
+            "\n\n## Pre-PR verification\n\n" + panel_text if result.panel_transcript else ""
+        )
+        submit_text = (
+            redact(result.submit_report or "no report was given", secrets)
+            if posted
+            else TRANSCRIPT_WITHHELD
         )
         # a failed body edit is a log line; the record below holds the decision
         _best_effort(
@@ -4219,7 +4233,7 @@ def publish(
                 number,
                 f"---\n**Edit ({date}, submit):** {note}\n\n"
                 f"{progress_link(config.target)}\n\n"
-                f"{redact(result.submit_report or 'no report was given', secrets)}"
+                f"{submit_text}"
                 f"{panel_section}\n\n"
                 f"{_self_merge_line(blessed_head, bless_reason)}",
             ),
@@ -4303,6 +4317,7 @@ def publish(
                 redact_secrets=secrets,
                 display_digits=bench.display_digits,
                 experiments=experiments_rows(run_dir),
+                transcripts=posted,
             )
             body += f"\n\n{progress_link(config.target)}\n"
             if issue_number:
@@ -4478,7 +4493,10 @@ def publish(
             run_id,
             outcome_name,
             pr_url,
-            redact(result.report(config, redact_secrets=secrets), secrets)[:8000],
+            redact(
+                result.report(config, redact_secrets=secrets, transcripts=transcripts_posted()),
+                secrets,
+            )[:8000],
             secrets,
         )
     if outcome_name != result.outcome:
@@ -5643,9 +5661,12 @@ def close_if_done(run_root: Path, record: RunRecord, github: GitHubClient, now: 
             raise
         pr = {"state": "closed"}
     reason = str(record.stage.get("withdraw_reason") or "")
+    # the author's own words: withheld when the deployment keeps session text
+    # off GitHub (the request stays in the run's local message journal)
+    shown = reason if transcripts_posted() else TRANSCRIPT_WITHHELD
     if reason and pr.get("state") == "open" and not (pr.get("merged") or pr.get("merged_at")):
         number = _pr_number(record.pr_url)
-        body = f"{marker('withdraw')}\nAuthor withdrew: {reason}"
+        body = f"{marker('withdraw')}\nAuthor withdrew: {shown}"
         if not any(c.get("body") == body for c in github.list_comments(record.target, number)):
             github.comment(record.target, number, body)
         github.close_issue(record.target, number)
@@ -5665,7 +5686,7 @@ def close_if_done(run_root: Path, record: RunRecord, github: GitHubClient, now: 
         raise LedgerWriteError("branch ledger observation deferred") from exc
     note = "PR merged" if ending == MERGED else "PR closed unmerged"
     if ending == REJECTED and reason:
-        note = f"Author withdrew: {reason}"
+        note = f"Author withdrew: {shown}"
     if _pr_number(record.pr_url) in unmeasured:
         note = "PR merged; merged tree was not measured, leaderboard unchanged"
         if not any(

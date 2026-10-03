@@ -7271,3 +7271,31 @@ def test_contains_tip_falls_back_for_missing_objects(tmp_path, answer):
     ws = Workspace(root=tmp_path)
     assert _contains_tip(ws, "tip", "measured", cast(Any, GitHub()), "o/r") is bool(answer)
     assert not _contains_tip(ws, "tip", "measured")
+
+
+def test_a_deployment_can_keep_session_text_off_the_pr_and_the_issue(tmp_path, monkeypatch):
+    """OUTERLOOP_POST_TRANSCRIPTS=off: the PR opens with its measurements and
+    a note, and the requesting issue's report carries no session text; the
+    local report keeps it."""
+    monkeypatch.setenv("OUTERLOOP_POST_TRANSCRIPTS", "off")
+    state, run_id = _write_parked_candidate(
+        tmp_path, monkeypatch, values={"baseline": 13.0, "candidate": 12.0}, issue_number=42
+    )
+    github = CommentingGitHub()
+    outcome = resume_run(
+        state,
+        run_id,
+        dispatch=_fake_dispatch(),
+        github=github,  # type: ignore[arg-type]
+        bot_auth=NoAuth(),
+        now=1_000_100.0,
+    )
+    assert outcome.outcome == "improved"
+    body = github.prs[0]["body"]
+    assert "swapped the construction heuristic" not in body
+    assert "OUTERLOOP_POST_TRANSCRIPTS=off" in body and "## Measured" in body
+    _, issue_report = github.issue_comments[-1]
+    assert "swapped the construction heuristic" not in issue_report
+    assert "OUTERLOOP_POST_TRANSCRIPTS=off" in issue_report
+    local = (state / "runs" / run_id / "report.md").read_text()
+    assert "swapped the construction heuristic" in local

@@ -4790,3 +4790,22 @@ def test_hermes_panel_preflight_runtime(tmp_path, monkeypatch, state):
         assert problem == ""
     else:
         assert "bash scripts/install_hermes.sh" in problem
+
+
+def test_research_log_archives_reports_without_session_text_when_asked(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    from outerloop.runstate import run_dir as _rd
+    from outerloop.tick import _ledger_since, service_research_log
+
+    _ledger_since(tmp_path, "org/yolo").write_text("1")  # past first pass
+    _ended_run(tmp_path, "r-1")
+    (_rd(tmp_path, "r-1") / "report.md").write_text(
+        "# Run report\nOutcome: **negative-result**\n\n## Agent's report\nSESSION_PROSE\n"
+    )
+    monkeypatch.setenv("OUTERLOOP_POST_TRANSCRIPTS", "off")
+    gh = LedgerGitHub()
+    assert service_research_log(tmp_path, gh, _spec(), NOW) == 1
+    ((_, content, _),) = gh.files
+    assert "SESSION_PROSE" not in content and "Outcome: **negative-result**" in content
+    assert "SESSION_PROSE" in (_rd(tmp_path, "r-1") / "report.md").read_text()

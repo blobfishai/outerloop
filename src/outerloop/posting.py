@@ -9,12 +9,74 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+from collections.abc import Mapping
 
 from outerloop.github import GitHubClient, GitHubError
 from outerloop.harness import redact
 from outerloop.markers import marker
 
 log = logging.getLogger(__name__)
+
+# The operator's switch for session text on GitHub. Off (0, off, false, no),
+# the author's report, the panel judges' transcripts and the author's notes
+# on its launches stay in the run's records on the orchestrator host; pull
+# requests, issue reports, the archived run reports and the climb board carry
+# the measured results and a note saying where the text is. Meant for a
+# private target, or sessions that read material that must not leave the
+# deployment. The author's replies to review comments are messages it
+# addresses to the reviewers, and are still posted.
+TRANSCRIPTS_ENV = "OUTERLOOP_POST_TRANSCRIPTS"
+_TRANSCRIPTS_ON = frozenset({"", "1", "on", "true", "yes"})
+_TRANSCRIPTS_OFF = frozenset({"0", "off", "false", "no"})
+_WARNED_VALUES: set[str] = set()
+TRANSCRIPT_WITHHELD = (
+    f"*Session text is not posted for this deployment (`{TRANSCRIPTS_ENV}=off`); it "
+    "stays in the run's records on the orchestrator host.*"
+)
+# The headings that open a run report's session text, as the climb
+# (orchestrator.AttemptResult.report) and the steward (a re-based env, or a
+# session that changed nothing) write them.
+_SESSION_SECTIONS = ("## Agent's report", "## Stewardship report", "## Steward's report")
+
+
+def transcripts_posted(environ: Mapping[str, str] | None = None) -> bool:
+    """Whether session text may be posted to GitHub (see TRANSCRIPTS_ENV):
+    unset, empty, 1, on, true or yes. A privacy switch fails closed: any other
+    value, such as one with a trailing comment, keeps the text off GitHub and
+    is logged once."""
+    env = os.environ if environ is None else environ
+    value = env.get(TRANSCRIPTS_ENV, "").strip().casefold()
+    if value in _TRANSCRIPTS_ON:
+        return True
+    if value not in _TRANSCRIPTS_OFF and value not in _WARNED_VALUES:
+        _WARNED_VALUES.add(value)
+        log.warning(
+            "%s=%r is neither on nor off; session text stays off GitHub", TRANSCRIPTS_ENV, value
+        )
+    return False
+
+
+def panel_summary(rounds: int, blocking_open: bool, degraded: bool) -> str:
+    """The panel's outcome without its transcript, for a withheld section."""
+    if blocking_open:
+        state = "blocking findings open"
+    elif degraded:
+        state = "the final read was degraded (a lens produced no verdict)"
+    else:
+        state = "clean"
+    return f"{rounds} panel read(s); {state}. Judge transcripts: {TRANSCRIPT_WITHHELD}"
+
+
+def withhold_session_text(report: str) -> str:
+    """A run report with its session text cut: from the first session heading
+    on, the report is replaced by the withheld note. A report without one is
+    returned unchanged."""
+    cuts = [i for i in (report.find(heading) for heading in _SESSION_SECTIONS) if i >= 0]
+    if not cuts:
+        return report
+    return f"{report[: min(cuts)].rstrip()}\n\n{TRANSCRIPT_WITHHELD}\n"
+
 
 # Posting/transport failures an advisory role tolerates — logged, never fatal,
 # because an advisory reviewer or verifier must not turn a target repo's CI red.

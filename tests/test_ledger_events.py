@@ -648,3 +648,28 @@ def test_same_tick_merge_observation_respects_ledger_hold(tmp_path, rebless_run,
     run_rebless_sweep(tmp_path, fake, 5)
     assert merges == [1]
     assert load_record(tmp_path, r.run_id).state == ENDED
+
+
+def test_a_withdrawal_reason_stays_local_when_session_text_does(tmp_path, monkeypatch):
+    from outerloop.attempt import withdraw_pr
+    from outerloop.markers import marker
+
+    monkeypatch.setenv("OUTERLOOP_POST_TRANSCRIPTS", "off")
+    fake, github = client()
+    fake.pull_requests[1] = {"state": "open", "merged": False}
+    monkeypatch.setattr(
+        fake,
+        "close_issue",
+        lambda repo, number: fake.pull_requests[number].update(state="closed"),
+        raising=False,
+    )
+    r = record(tmp_path)
+    assert withdraw_pr(tmp_path, r, github, "REASON_PROSE: a better idea came up") == ""
+    assert close_if_done(tmp_path, load_record(tmp_path, r.run_id), github, 2) == "rejected"
+    (posted,) = fake.comments
+    assert posted["body"].startswith(f"{marker('withdraw')}\nAuthor withdrew: ")
+    assert (
+        "REASON_PROSE" not in posted["body"] and "OUTERLOOP_POST_TRANSCRIPTS=off" in posted["body"]
+    )
+    final = load_record(tmp_path, r.run_id)
+    assert "REASON_PROSE" not in final.ending_note  # the board publishes this note

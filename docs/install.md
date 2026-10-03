@@ -787,6 +787,41 @@ The judge keys stay separate from the author's. The tick compares key values,
 not only paths, before it queues a climb; a climb started by hand refuses a
 judge key that holds the author's key, and a wake skips the panel instead.
 
+## Keeping session text off GitHub
+
+By default a pull request carries the author's report and the panel judges'
+transcripts, the requesting issue gets the run report, and the `research-log`
+branch archives it. A deployment whose target is private, or whose sessions
+read material that must stay on its own hosts, can set
+`OUTERLOOP_POST_TRANSCRIPTS=off` in `~/.config/outerloop/.env`. Pull requests
+and their edits, issue reports, archived run reports, and the climb board and
+status strip then carry the measured results, what ran, the panel's outcome
+and a note in place of the author's report, the judges' transcripts, the
+author's note on each launch and a withdrawal reason; the pushed commit's
+subject no longer quotes the report. The run's local records on the
+orchestrator host keep the text. Only `1`, `on`, `true`, `yes` or an empty
+value post it; any other value (a typo, a trailing comment) keeps it off and is
+logged.
+
+The switch does not cover:
+
+- the author's replies to review comments, which are messages it addresses to
+  the reviewers;
+- the code it pushes, and the notebook a research-line author keeps on its line
+  branch, which is the line's working memory;
+- the experiments table's launch names and the last line each job printed;
+- text published before the switch was set, and jobs queued before it was set,
+  which keep the environment they were submitted with.
+
+An older kernel ignores the setting, so roll back only with this in mind.
+
+Independent of this switch, every body, title, commit message and file the
+kernel writes to GitHub through its API is redacted at the moment it is sent,
+against every credential the process has read or minted. A PAT or key file
+rewritten while a run is live is therefore never posted, even in text built
+before the rotation. Git pushes carry the tree the gate measured, which the
+kernel does not rewrite.
+
 ## Safety defaults
 
 On by default. Think hard before changing any of them:

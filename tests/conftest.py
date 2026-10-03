@@ -62,6 +62,14 @@ def _configured_bot_login(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _fresh_secret_registries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Credentials read or minted in one test must not redact text in another:
+    the process-wide redaction sets start empty for every test."""
+    monkeypatch.setattr("outerloop.github._SEEN_SECRETS", [])
+    monkeypatch.setattr("outerloop.appauth._ISSUED_TOKENS", [])
+
+
+@pytest.fixture(autouse=True)
 def _configured_claude_model(monkeypatch: pytest.MonkeyPatch) -> None:
     """OUTERLOOP_CLAUDE_MODEL is a required deployment setting with no code
     default; tests run as a configured deployment unless they unset it to

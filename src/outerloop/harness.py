@@ -223,15 +223,19 @@ def vertex_from_env() -> VertexConfig | None:
 
 
 def redact(text: str, secrets: tuple[str, ...]) -> str:
-    """Strip known secrets from text before it is stored anywhere. Installation
-    tokens minted after a call site snapshotted its tuple are covered too: the
-    App provider rotates ~hourly, so the process-wide issued set is consulted
-    at write time, not capture time."""
+    """Strip known secrets from text before it is stored anywhere. Credentials
+    that appeared after a call site snapshotted its tuple are covered too: the
+    App provider mints a new installation token about hourly, and a key or
+    token file rewritten during a run is re-read, so the process-wide sets of
+    minted and read credentials are consulted at write time, not capture time.
+    Longer secrets are replaced first, so one that contains another is never
+    left half-visible."""
     from outerloop.appauth import issued_tokens
+    from outerloop.github import seen_secrets
 
-    for secret in (*secrets, *issued_tokens()):
-        if secret:
-            text = text.replace(secret, "[redacted]")
+    known = {secret for secret in (*secrets, *issued_tokens(), *seen_secrets()) if secret}
+    for secret in sorted(known, key=len, reverse=True):
+        text = text.replace(secret, "[redacted]")
     return text
 
 
