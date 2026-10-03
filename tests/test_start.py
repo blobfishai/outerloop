@@ -745,10 +745,27 @@ def test_start_refuses_without_the_claude_model(clean_env, monkeypatch, capsys, 
     assert main(argv) == 0
 
 
-def test_hermes_is_a_review_backend_not_an_author(tmp_path):
+def test_a_hermes_author_needs_its_pinned_runtime(tmp_path):
+    """Hermes has no CLI to find: start checks the source checkout and runtime
+    at REVIEW_HERMES_REPO instead, and names the installer when they are missing."""
+    from outerloop.hermes_install import HERMES_SHA, hermes_runtime
+
     problem = cli.missing_harness_binary({"OUTERLOOP_AUTHOR_BACKEND": "hermes"}, {})
-    assert "unsupported author backend 'hermes'" in problem
+    assert "REVIEW_HERMES_REPO is not set" in problem
     assert "scripts/install_hermes.sh" in problem
+    repo = tmp_path / "hermes-agent"
+    repo.mkdir()
+    (repo / "run_agent.py").touch()
+    values = {"OUTERLOOP_AUTHOR_BACKEND": "hermes", "REVIEW_HERMES_REPO": str(repo)}
+    assert f"at {repo}" in cli.missing_harness_binary(values, {})
+    runtime = hermes_runtime(repo)
+    (runtime / "venv/bin").mkdir(parents=True)
+    (runtime / "venv/bin/python").write_text("#!/bin/sh\n")
+    (runtime / "venv/bin/python").chmod(0o755)
+    (runtime / ".complete").write_text(HERMES_SHA)
+    assert cli.missing_harness_binary(values, {}) == ""
+    unknown = cli.missing_harness_binary({"OUTERLOOP_AUTHOR_BACKEND": "bogus"}, {})
+    assert "unsupported author backend 'bogus'" in unknown
 
 
 # ---------------------------------------------------------------- uv

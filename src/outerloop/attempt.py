@@ -56,6 +56,7 @@ from outerloop.github import (
     git_identity,
 )
 from outerloop.harness import (
+    AUTHOR_BACKENDS,
     ClaudeModelUnset,
     Harness,
     SessionResult,
@@ -162,36 +163,56 @@ PANEL_KEY_DEFAULT = str(CONFIG_DIR / "verifier_key")
 # Author keys live at ~/.config/outerloop/<backend>_key.
 CLAUDE_KEY_DEFAULT = str(CONFIG_DIR / "claude_key")
 CODEX_KEY_DEFAULT = str(CONFIG_DIR / "codex_key")
+HERMES_KEY_DEFAULT = str(CONFIG_DIR / "hermes_key")
 
 
 def resolve_author_key_file(backend: str, explicit: str = "") -> str:
-    """The author key file for `backend`. Per-backend keys COEXIST (claude's and
-    codex's both on disk), selected by backend — so the author backend is a
-    config choice, not a key swap, and an in-flight run of either backend can
-    still be woken/serviced after a fleet flip. An explicit path always wins;
-    otherwise the per-backend env var, then the default path. The result is
-    always ~-expanded, so every caller gets a real path (an env value like
-    "~/.config/..." must not reach the token provider verbatim)."""
+    """The author key file for `backend`. Per-backend keys COEXIST (claude's,
+    codex's and hermes's all on disk), selected by backend — so the author
+    backend is a config choice, not a key swap, and an in-flight run of any
+    backend can still be woken/serviced after a fleet flip. An explicit path
+    always wins; otherwise the per-backend env var, then the default path. The
+    result is always ~-expanded, so every caller gets a real path (an env value
+    like "~/.config/..." must not reach the token provider verbatim)."""
     if not explicit:
         if backend == "codex":
             explicit = os.environ.get("OUTERLOOP_CODEX_KEY_FILE") or CODEX_KEY_DEFAULT
+        elif backend == "hermes":
+            explicit = os.environ.get("OUTERLOOP_HERMES_KEY_FILE") or HERMES_KEY_DEFAULT
         else:
             explicit = os.environ.get("OUTERLOOP_CLAUDE_KEY_FILE") or CLAUDE_KEY_DEFAULT
     return os.path.expanduser(explicit)
 
 
-def codex_author_config_error(backend: str, model: str, image: str) -> str:
-    """Why a codex author would die at startup ("" when it won't). Validates the
+def hermes_author_endpoint() -> tuple[str, str]:
+    """`(provider, base URL)` for a hermes author: OUTERLOOP_HERMES_PROVIDER
+    (openrouter by default, openai, or custom for an OpenAI-compatible
+    endpoint) and OUTERLOOP_HERMES_BASE_URL, which only custom takes."""
+    provider = os.environ.get("OUTERLOOP_HERMES_PROVIDER", "").strip().lower() or "openrouter"
+    return provider, os.environ.get("OUTERLOOP_HERMES_BASE_URL", "").strip()
+
+
+def hermes_source() -> str:
+    """The pinned hermes-agent checkout every hermes role runs (judges and the
+    author share one installation): REVIEW_HERMES_REPO, which init and
+    `outerloop harness upgrade` record."""
+    return os.path.expanduser(os.environ.get("REVIEW_HERMES_REPO", "").strip())
+
+
+def author_config_error(backend: str, model: str, image: str) -> str:
+    """Why an author would die at startup ("" when it won't). Validates the
     EFFECTIVE (backend, model) — the fresh climb passes args; a wake
     passes the PARKED RUN's persisted pair — so backend and model are checked as
-    a unit and never a fleet backend against a run's model. codex writes+executes,
-    so it must be contained (--image) and needs a non-claude model."""
-    if backend not in ("claude", "codex"):
+    a unit and never a fleet backend against a run's model. codex and hermes
+    write and execute with no sandbox of their own, so they must be contained
+    (--image) and need a model named for their provider; hermes also needs its
+    pinned source and runtime and a valid provider endpoint."""
+    if backend not in AUTHOR_BACKENDS:
         # a typo'd OUTERLOOP_AUTHOR_BACKEND passes the env DEFAULT silently
         # (argparse validates the flag, not its default) and the climb rejects it
         # at build_harness — catch it on the tick host so a claimed intake
         # issue never strands on it
-        return f"unknown author backend {backend!r} (expected 'claude' or 'codex')"
+        return f"unknown author backend {backend!r} (expected one of {', '.join(AUTHOR_BACKENDS)})"
     if backend == "claude":
         # symmetric to the codex check: a claude harness 404s on a non-claude
         # model (e.g. OUTERLOOP_AUTHOR_MODEL left on a codex id while the
@@ -200,13 +221,59 @@ def codex_author_config_error(backend: str, model: str, image: str) -> str:
             return f"author-backend claude needs a claude model (got {model!r})"
         return ""
     if not image:
-        return "author-backend codex requires --image (it runs contained)"
+        return f"author-backend {backend} requires --image (it runs contained)"
+    if backend == "hermes":
+        if not model:
+            return (
+                "author-backend hermes needs OUTERLOOP_AUTHOR_MODEL: the model name its "
+                "provider serves (hermes never picks one)"
+            )
+        from outerloop.hermes_install import hermes_ready
+        from outerloop.role_runner import hermes_endpoint_error
+
+        repo = hermes_source()
+        if not repo or not hermes_ready(Path(repo)):
+            return (
+                "author-backend hermes needs the pinned hermes-agent source and runtime; "
+                f"run bash scripts/install_hermes.sh {repo or '$REVIEW_HERMES_REPO'}"
+            )
+        endpoint_error = hermes_endpoint_error(*hermes_author_endpoint())
+        if endpoint_error:
+            return f"OUTERLOOP_HERMES_PROVIDER/OUTERLOOP_HERMES_BASE_URL: {endpoint_error}"
+        return ""
     if not model or model.startswith("claude"):
         return (
             "author-backend codex needs a codex/openai model in OUTERLOOP_AUTHOR_MODEL "
             f"(e.g. gpt-5.6-terra), not a claude model or none (got {model!r})"
         )
     return ""
+
+
+# the name the tick and older callers know
+codex_author_config_error = author_config_error
+
+
+def _author_harness(
+    api_key: str, spec: RoleSpec, *, backend: str, model: str, args: Any
+) -> Harness:
+    """The author's harness on any backend, from the climb's arguments — one
+    construction for the fresh climb and the wake, so a resumed author runs
+    exactly as it started (its backend and model come from the record)."""
+    hermes = backend == "hermes"
+    provider, base_url = hermes_author_endpoint() if hermes else ("", "")
+    repo = hermes_source() if hermes else ""
+    return build_harness(
+        api_key,
+        spec,
+        backend=backend,
+        binary=args.claude_bin if backend == "claude" else args.codex_bin,
+        model=model,
+        container_image=args.image,
+        codex_extra_args=getattr(args, "codex_extra", ()),
+        hermes_repo=Path(repo) if repo else None,
+        hermes_provider=provider,
+        hermes_base_url=base_url,
+    )
 
 
 def _resolve_codex_config(
@@ -5147,12 +5214,14 @@ def main() -> int:
     )
     parser.add_argument(
         "--author-backend",
-        choices=("claude", "codex"),
+        choices=AUTHOR_BACKENDS,
         default=os.environ.get("OUTERLOOP_AUTHOR_BACKEND") or "claude",
         help="agent backend for the author/editor role (config-driven: default "
         "from OUTERLOOP_AUTHOR_BACKEND). codex runs contained (apptainer + "
         "--sandbox danger-full-access) and REQUIRES --image and a codex/openai "
-        "--model (e.g. gpt-5.6-terra).",
+        "--model (e.g. gpt-5.6-terra). hermes runs contained too, REQUIRES --image "
+        "and a --model its provider serves, and reads OUTERLOOP_HERMES_PROVIDER / "
+        "OUTERLOOP_HERMES_BASE_URL and the pinned source in REVIEW_HERMES_REPO.",
     )
     parser.add_argument(
         "--codex-config",
@@ -5207,7 +5276,8 @@ def main() -> int:
         "--key-file",
         default="",
         help="author key file; default resolves per backend (config-driven): "
-        "OUTERLOOP_CLAUDE_KEY_FILE for claude, OUTERLOOP_CODEX_KEY_FILE for codex",
+        "OUTERLOOP_CLAUDE_KEY_FILE for claude, OUTERLOOP_CODEX_KEY_FILE for codex, "
+        "OUTERLOOP_HERMES_KEY_FILE for hermes",
     )
     parser.add_argument("--issue", type=int, default=0)
     parser.add_argument(
@@ -5352,14 +5422,8 @@ def main() -> int:
                 else author_spec
             )
             wake_spec = role_spec(max_turns=args.max_turns, walltime_s=args.session_minutes * 60)
-            wake_harness = build_harness(
-                wake_api_key,
-                wake_spec,
-                backend=wake_backend,
-                binary=args.claude_bin if wake_backend == "claude" else args.codex_bin,
-                model=wake_model,
-                container_image=args.image,
-                codex_extra_args=codex_extra,
+            wake_harness = _author_harness(
+                wake_api_key, wake_spec, backend=wake_backend, model=wake_model, args=args
             )
         wake_secrets = tuple(k for k in (bot_auth.token(), *wake_panel_secrets, wake_api_key) if k)
         try:
@@ -5490,14 +5554,8 @@ def main() -> int:
                 base_branch=args.base_branch,
                 run_root=args.run_root,
                 run_id=run_id,
-                harness=build_harness(
-                    api_key,
-                    spec,
-                    backend=args.author_backend,
-                    binary=args.claude_bin if args.author_backend == "claude" else args.codex_bin,
-                    model=args.model,
-                    container_image=args.image,
-                    codex_extra_args=codex_extra,
+                harness=_author_harness(
+                    api_key, spec, backend=args.author_backend, model=args.model, args=args
                 ),
                 spec=spec,
                 panel_lenses=panel_lenses,

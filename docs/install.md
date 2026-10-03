@@ -303,7 +303,7 @@ outerloop checkout, run `bash scripts/install_claude.sh [target_path]` or
 The default target is `$OUTERLOOP_<BACKEND>_BIN`, else `~/.local/bin/<backend>`.
 Claude 2.1.272 is pinned for Linux x64 (glibc/musl) and ARM64; other platforms
 are refused. Installation needs `curl`, `sha256sum`, and a writable target
-directory. Hermes remains a review backend, provisioned with
+directory. Hermes, as author or reviewer, is provisioned with
 `bash scripts/install_hermes.sh [target_dir]`.
 
 **Host prerequisites for model backends.** From the outerloop checkout:
@@ -312,8 +312,9 @@ directory. Hermes remains a review backend, provisioned with
   `bash scripts/install_claude.sh`.
 - Codex, as author or reviewer: the pinned Codex CLI; install with
   `bash scripts/install_codex.sh`.
-- Hermes, as reviewer only (not an author backend): the pinned hermes-agent
-  source checkout and runtime; install with `bash scripts/install_hermes.sh`.
+- Hermes, as author or reviewer: the pinned hermes-agent source checkout and
+  runtime; install with `bash scripts/install_hermes.sh`. Every hermes role
+  shares the one checkout named by `REVIEW_HERMES_REPO`.
 
 `init` records the absolute Claude
 or Codex path found on PATH (or in `~/.local/bin`) as `OUTERLOOP_<BACKEND>_BIN`.
@@ -323,9 +324,10 @@ launch before any job runs. After installing or moving it, run
 `outerloop init --force` to record its path again. `--dry-run` prints the launch
 command without checking the CLI. For Hermes, set `REVIEW_HERMES_REPO` to the installed checkout (the installer
 defaults to `~/hermes-agent`). Full `init` installs a missing Hermes runtime when
-`OUTERLOOP_PANEL` includes a Hermes lens or `REVIEW_BACKEND=hermes`, reading the
-shell or existing `.env`, and records `REVIEW_HERMES_REPO`. `--no-install-harness`
-skips this installation too.
+the author is Hermes, `OUTERLOOP_PANEL` includes a Hermes lens or
+`REVIEW_BACKEND=hermes`, reading the shell or existing `.env`, and records
+`REVIEW_HERMES_REPO`; for a Hermes author, `start` checks that checkout and its
+runtime instead of a CLI. `--no-install-harness` skips this installation too.
 
 The Hermes installer needs `git` and `uv`. After verifying the pinned source it
 installs a uv-managed Python under `<repo>.runtime/<commit-sha>/python` and runs
@@ -495,10 +497,14 @@ the line to add; `OUTERLOOP_AUTHOR_MODEL` overrides it for the author and
 same-backend judges. The
 author key file is
 `OUTERLOOP_<BACKEND>_KEY_FILE` (`OUTERLOOP_CLAUDE_KEY_FILE`,
-`OUTERLOOP_CODEX_KEY_FILE`; `init` writes the key to
+`OUTERLOOP_CODEX_KEY_FILE`, `OUTERLOOP_HERMES_KEY_FILE`; `init` writes the key to
 `~/.config/outerloop/<backend>_key`, 0600). A Codex author always runs contained,
 so it also needs the image
-(`OUTERLOOP_IMAGE`) and a Codex model in `OUTERLOOP_AUTHOR_MODEL`.
+(`OUTERLOOP_IMAGE`) and a Codex model in `OUTERLOOP_AUTHOR_MODEL`. A Hermes
+author runs contained as well; it needs the model name its provider serves in
+`OUTERLOOP_AUTHOR_MODEL`, the pinned source in `REVIEW_HERMES_REPO`, and its
+provider in `OUTERLOOP_HERMES_PROVIDER` (`openrouter`, the default, `openai`, or
+`custom` with `OUTERLOOP_HERMES_BASE_URL`; see below).
 `OUTERLOOP_CODEX_CONFIG` passes codex `-c KEY=VALUE` overrides to the Codex
 author, separated by `;` because a TOML value may hold commas (for example
 `use_legacy_landlock=true;model_reasoning_effort=high`). The tick forwards it to
@@ -743,10 +749,24 @@ unaffected — those models are not on GCP.
 
 ## Models on an OpenAI-compatible endpoint
 
-Panel judges can run models served behind any OpenAI-compatible API (a
-self-hosted inference server, or a managed endpoint for open-weights models)
-instead of a vendor's own API.
+The author and the panel judges can run models served behind any
+OpenAI-compatible API (a self-hosted inference server, or a managed endpoint for
+open-weights models) instead of a vendor's own API.
 
+- **Hermes author.** Set `OUTERLOOP_AUTHOR_BACKEND=hermes`,
+  `OUTERLOOP_AUTHOR_MODEL` to the model name the endpoint serves,
+  `OUTERLOOP_HERMES_PROVIDER=custom` and `OUTERLOOP_HERMES_BASE_URL` to the
+  endpoint (for example `https://models.example.com/v1`). The key file is
+  `OUTERLOOP_HERMES_KEY_FILE` (default `~/.config/outerloop/hermes_key`). The
+  author runs contained, with the file and terminal toolsets, and resumes
+  across wakes from its saved transcript. Live session events and the
+  session-control writer record cover Claude and Codex authors only. A lens
+  that names no backend runs on Hermes for a Hermes author.
+- **Codex author.** Define the endpoint as a codex model provider in
+  `OUTERLOOP_CODEX_CONFIG`, for example
+  `model_provider=local;model_providers.local.name=local;model_providers.local.base_url=https://models.example.com/v1;model_providers.local.env_key=OPENAI_API_KEY`,
+  plus any other model provider option the endpoint needs. The session
+  receives the author key as `OPENAI_API_KEY`.
 - **Hermes judges.** Set `REVIEW_HERMES_PROVIDER=custom` and
   `REVIEW_HERMES_BASE_URL` to the endpoint's base URL (for example
   `https://models.example.com/v1`), and name the model in the lens

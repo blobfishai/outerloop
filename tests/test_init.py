@@ -374,9 +374,9 @@ def test_github_app_warns_when_it_lands_under_a_different_account(
 
 def test_main_yes_rejects_an_unknown_author_backend(tmp_path: Path, monkeypatch, capsys) -> None:
     monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
-    rc = init.main(["--yes", "--compute", "local", "--target", "o/r", "--author-backend", "hermes"])
+    rc = init.main(["--yes", "--compute", "local", "--target", "o/r", "--author-backend", "bogus"])
     assert rc == 2
-    assert "author backend must be one of claude, codex" in capsys.readouterr().err
+    assert "author backend must be one of claude, codex, hermes" in capsys.readouterr().err
 
 
 def test_render_env_app_file_wins_over_pat() -> None:

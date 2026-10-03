@@ -241,6 +241,11 @@ HARNESS_INSTALL = {
     "hermes": "bash scripts/install_hermes.sh",
 }
 
+# The climbing author's harnesses (the climb's --author-backend choices, and
+# init's). hermes reaches any model its provider serves: OpenRouter, OpenAI, or
+# an OpenAI-compatible endpoint.
+AUTHOR_BACKENDS = ("claude", "codex", "hermes")
+
 
 def default_binary(backend: str, environ: Mapping[str, str] | None = None) -> str:
     """The host CLI a job spawns for `backend`: the path init recorded

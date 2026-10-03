@@ -29,6 +29,18 @@ Versions follow [SemVer](https://semver.org).
   author's key; a wake still skips the panel. Codex config values lose the
   blank after `=`. Upgrading: `wake-spec.json` gains `panel_codex_config`;
   older kernels ignore it.
+- Hermes is an author backend beside Claude and Codex
+  (`OUTERLOOP_AUTHOR_BACKEND=hermes`, `--author-backend hermes`). It runs
+  contained, needs a model named for its provider, the pinned source in
+  `REVIEW_HERMES_REPO` and a key in `OUTERLOOP_HERMES_KEY_FILE`, and reaches
+  OpenRouter, OpenAI or an OpenAI-compatible endpoint through
+  `OUTERLOOP_HERMES_PROVIDER` and `OUTERLOOP_HERMES_BASE_URL`. The climb and the
+  wake build the author through one construction; the tick preflight, `start`,
+  `outerloop init` and `outerloop harness upgrade --used` accept it. Claude and
+  Codex deployments behave as before. Upgrading: run records gain no fields,
+  but `author_backend` may now be `hermes`; an older kernel's wake refuses that
+  backend and hands the lease back, so drain hermes-authored runs before rolling
+  back.
 - Native research plans can explicitly select Claude/Codex API authentication
   or Claude on Vertex, alongside the existing subscription mode. Public
   authentication coordinates belong to the persistent conversation identity;
