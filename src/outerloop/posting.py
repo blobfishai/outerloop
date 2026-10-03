@@ -27,8 +27,9 @@ log = logging.getLogger(__name__)
 # deployment. The author's replies to review comments are messages it
 # addresses to the reviewers, and are still posted.
 TRANSCRIPTS_ENV = "OUTERLOOP_POST_TRANSCRIPTS"
-_TRANSCRIPTS_ON = frozenset({"", "1", "on", "true", "yes"})
-_TRANSCRIPTS_OFF = frozenset({"0", "off", "false", "no"})
+_TRANSCRIPTS_ON = frozenset({"1", "on", "true", "yes"})
+# empty is an explicit off-switch, as `OUTERLOOP_PANEL=""` is for the panel
+_TRANSCRIPTS_OFF = frozenset({"", "0", "off", "false", "no"})
 _WARNED_VALUES: set[str] = set()
 TRANSCRIPT_WITHHELD = (
     f"*Session text is not posted for this deployment (`{TRANSCRIPTS_ENV}=off`); it "
@@ -42,11 +43,15 @@ _SESSION_SECTIONS = ("## Agent's report", "## Stewardship report", "## Steward's
 
 def transcripts_posted(environ: Mapping[str, str] | None = None) -> bool:
     """Whether session text may be posted to GitHub (see TRANSCRIPTS_ENV):
-    unset, empty, 1, on, true or yes. A privacy switch fails closed: any other
-    value, such as one with a trailing comment, keeps the text off GitHub and
-    is logged once."""
+    when the setting is absent, or set to 1, on, true or yes. Present, it is a
+    privacy switch that fails closed: empty (the deploy step's off-switch
+    convention) or 0, off, false, no keeps the text off GitHub, and so does
+    any other value, such as one with a trailing comment, which is logged
+    once."""
     env = os.environ if environ is None else environ
-    value = env.get(TRANSCRIPTS_ENV, "").strip().casefold()
+    if TRANSCRIPTS_ENV not in env:
+        return True
+    value = env[TRANSCRIPTS_ENV].strip().casefold()
     if value in _TRANSCRIPTS_ON:
         return True
     if value not in _TRANSCRIPTS_OFF and value not in _WARNED_VALUES:

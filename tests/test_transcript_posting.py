@@ -103,8 +103,10 @@ def test_nested_review_comments_are_scrubbed_too() -> None:
 
 @pytest.mark.parametrize(
     ("value", "posted"),
-    [(None, True), ("", True), ("on", True), ("1", True), ("YES", True), ("off", False),
+    [(None, True), ("on", True), ("1", True), ("YES", True), ("off", False),
      ("0", False), (" False ", False), ("no", False),
+     # set but empty is the deploy step's off-switch convention
+     ("", False), ("  ", False),
      # a privacy switch fails closed: a trailing comment or a typo means off
      ("off  # private target", False), ("disabled", False), ("onn", False)],
 )  # fmt: skip

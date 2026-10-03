@@ -799,9 +799,10 @@ status strip then carry the measured results, what ran, the panel's outcome
 and a note in place of the author's report, the judges' transcripts, the
 author's note on each launch and a withdrawal reason; the pushed commit's
 subject no longer quotes the report. The run's local records on the
-orchestrator host keep the text. Only `1`, `on`, `true`, `yes` or an empty
-value post it; any other value (a typo, a trailing comment) keeps it off and is
-logged.
+orchestrator host keep the text. Unset, the text is posted; once the setting
+is present, only `1`, `on`, `true` or `yes` post it. An empty value is an
+off-switch, as `OUTERLOOP_PANEL=""` is for the panel, and any other value (a
+typo, a trailing comment) keeps the text off too and is logged.
 
 The switch does not cover:
 

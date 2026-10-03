@@ -48,8 +48,9 @@ Versions follow [SemVer](https://semver.org).
   strip carry the measured results, what ran, the panel's outcome and a note
   instead of the author's report, the judges' transcripts, the author's launch
   notes and a withdrawal reason; the pushed commit's subject no longer quotes
-  the report. The run's local records keep the text. The switch fails closed:
-  only an empty value, `1`, `on`, `true` or `yes` post the text. It is on the
+  the report. The run's local records keep the text. Unset, the text is
+  posted; set, the switch fails closed: only `1`, `on`, `true` or `yes` post it,
+  and an empty value is an off-switch like `OUTERLOOP_PANEL=""`. It is on the
   tick's `.env` allowlist. Replies to review comments, pushed code and a
   research line's notebook are not covered (docs/install.md). Upgrading:
   unset, nothing changes; an older kernel ignores the setting and posts the
