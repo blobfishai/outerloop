@@ -741,6 +741,32 @@ session env then carries no Anthropic key at all. Unset the project var to
 fall back to API-key billing. OpenAI-backed roles (codex/hermes) are
 unaffected — those models are not on GCP.
 
+## Models on an OpenAI-compatible endpoint
+
+Panel judges can run models served behind any OpenAI-compatible API (a
+self-hosted inference server, or a managed endpoint for open-weights models)
+instead of a vendor's own API.
+
+- **Hermes judges.** Set `REVIEW_HERMES_PROVIDER=custom` and
+  `REVIEW_HERMES_BASE_URL` to the endpoint's base URL (for example
+  `https://models.example.com/v1`), and name the model in the lens
+  (`verify:hermes:my-model`). The judge's key file is still
+  `OUTERLOOP_PANEL_HERMES_KEY_FILE`. The harness writes a named provider entry
+  with the base URL into the session's private hermes config and passes the key
+  only through the session environment. A base URL is accepted only with the
+  `custom` provider, so an OpenRouter or OpenAI key is never sent to another
+  host.
+- **Codex judges.** Codex reads model providers from its config, so codex
+  judges run with the author's `OUTERLOOP_CODEX_CONFIG` followed by
+  `OUTERLOOP_PANEL_CODEX_CONFIG`. Codex applies `-c` overrides in order, so the
+  panel's value wins for a key both set, for example
+  `model_providers.local.base_url` to point the judges at another endpoint. A
+  provider entry that reads `OPENAI_API_KEY` receives the judge's own key.
+
+The judge keys stay separate from the author's. The tick compares key values,
+not only paths, before it queues a climb; a climb started by hand refuses a
+judge key that holds the author's key, and a wake skips the panel instead.
+
 ## Safety defaults
 
 On by default. Think hard before changing any of them:

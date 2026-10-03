@@ -40,7 +40,9 @@ def test_malformed_entries_are_refused_with_their_source(entry: str) -> None:
 
 
 def test_value_may_hold_equals_signs_and_spaces() -> None:
-    assert codex_config_entries([" a.b = x=y z "]) == ("a.b= x=y z",)
+    # `key = value` reads naturally; codex gets `key=value` (TOML has no
+    # leading blank), and the value keeps its own "=" and inner spaces
+    assert codex_config_entries([" a.b = x=y z "]) == ("a.b=x=y z",)
 
 
 # --------------------------------------------------------------- the climb

@@ -16,6 +16,19 @@ Versions follow [SemVer](https://semver.org).
   author on the tick host before anything is queued, and fails only jobs that
   start a Codex session. Upgrading: `wake-spec.json` gains a `codex_config`
   field; older kernels ignore it, and a spec without it loads as before.
+- Panel judges can use an OpenAI-compatible endpoint. Hermes judges take
+  `REVIEW_HERMES_PROVIDER=custom` with `REVIEW_HERMES_BASE_URL`; the harness
+  seeds a named provider entry carrying the base URL in the session's private
+  config, and the key stays in the session environment. A base URL is refused
+  with the OpenRouter and OpenAI providers. Codex judges receive the author's
+  codex config followed by `--panel-codex-config` /
+  `OUTERLOOP_PANEL_CODEX_CONFIG`, which the tick forwards with the panel. The
+  tick preflight checks the same settings, and compares every shelled judge's
+  key by value with the fleet author's key as well as the coexisting Codex
+  author key. A climb started by hand now refuses a judge key that holds the
+  author's key; a wake still skips the panel. Codex config values lose the
+  blank after `=`. Upgrading: `wake-spec.json` gains `panel_codex_config`;
+  older kernels ignore it.
 - Native research plans can explicitly select Claude/Codex API authentication
   or Claude on Vertex, alongside the existing subscription mode. Public
   authentication coordinates belong to the persistent conversation identity;

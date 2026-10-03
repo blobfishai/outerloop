@@ -1249,6 +1249,46 @@ class CodexHarness:
         return parsed
 
 
+# An OpenAI-compatible endpoint for hermes is a NAMED provider entry the
+# harness seeds in the per-run config (`providers.<name>`, selected as
+# `custom:<name>`): it carries the base URL, and names the variable hermes
+# reads the key from, so the key stays in the session environment and never
+# lands in a file.
+HERMES_ENDPOINT_PROVIDER = "outerloop"
+HERMES_ENDPOINT_KEY_ENV = "OPENAI_COMPATIBLE_API_KEY"
+
+
+def _hermes_config(
+    provider: str,
+    model: str,
+    base_url: str,
+    key_env: str,
+    approvals_deny: tuple[str, ...],
+) -> str:
+    """The minimal headless hermes config.yaml: the provider, the default
+    model, a named endpoint entry for a `custom:<name>` provider, and the
+    shell deny-list. Every value is double-quoted; callers pass values that
+    hold no quotes or newlines (an endpoint URL is validated before here)."""
+    lines = ["model:\n"]
+    if model:
+        lines.append(f'  default: "{model}"\n')
+    lines.append(f'  provider: "{provider}"\n')
+    name = provider.partition(":")[2]
+    if provider.startswith("custom:") and base_url:
+        lines += [
+            "providers:\n",
+            f"  {name}:\n",
+            f'    base_url: "{base_url}"\n',
+            f'    key_env: "{key_env}"\n',
+        ]
+        if model:
+            lines.append(f'    default_model: "{model}"\n')
+    if approvals_deny:
+        lines.append("approvals:\n  deny:\n")
+        lines += [f'    - "{glob}"\n' for glob in approvals_deny]
+    return "".join(lines)
+
+
 def _hermes_command(
     repo_dir: Path,
     query: str,
@@ -1384,7 +1424,9 @@ class HermesHarness:
     # Useful to hardline-forbid specific dangerous commands.
     approvals_deny: tuple[str, ...] = ()
     model: str = ""  # OpenRouter format (provider/model); empty -> hermes default
-    base_url: str = ""  # empty -> the seeded provider's own endpoint
+    # empty -> the seeded provider's own endpoint; with a `custom:<name>`
+    # provider, the OpenAI-compatible endpoint its seeded entry routes to
+    base_url: str = ""
     max_turns: int = DEFAULT_MAX_TURNS
     timeout_s: int = DEFAULT_TIMEOUT_S
     enabled_toolsets: tuple[str, ...] = ("file",)
@@ -1445,18 +1487,26 @@ class HermesHarness:
                 )
             prior_turns = loaded
             brief_to_send = f"{_render_resume_transcript(prior_turns)}\n\n{brief_text}"
+        if self.provider.startswith("custom:") and not self.base_url:
+            # a named endpoint without its URL would let hermes fall back to
+            # another provider with whatever key it finds: refuse instead
+            return _error_result(
+                "config-error", detail=f"hermes provider {self.provider} needs a base URL"
+            )
+        if any(c in value for value in (self.base_url, self.model) for c in '"\n\r'):
+            return _error_result(
+                "config-error", detail="hermes model and base URL cannot hold quotes or newlines"
+            )
         if self.provider:
-            # minimal headless config: provider + default model, nothing else
+            # minimal headless config: provider + default model (+ the named
+            # endpoint of a custom provider), nothing else
             hermes_dir = session_home / ".hermes"
             try:
                 hermes_dir.mkdir(mode=0o700, exist_ok=True)
-                config_lines = ["model:\n", f'  provider: "{self.provider}"\n']
-                if self.model:
-                    config_lines.insert(1, f'  default: "{self.model}"\n')
-                if self.approvals_deny:
-                    config_lines.append("approvals:\n  deny:\n")
-                    config_lines += [f'    - "{glob}"\n' for glob in self.approvals_deny]
-                if not _write_private_fixed(hermes_dir / "config.yaml", "".join(config_lines)):
+                config = _hermes_config(
+                    self.provider, self.model, self.base_url, self.key_env, self.approvals_deny
+                )
+                if not _write_private_fixed(hermes_dir / "config.yaml", config):
                     raise OSError("hermes config write refused (symlink?) or failed")
             except OSError as exc:
                 log.warning("could not seed hermes config: %s", exc)

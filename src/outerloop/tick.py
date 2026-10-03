@@ -248,6 +248,9 @@ class ServiceSpec:
     # overrides, ";"-separated, forwarded to every climb and wake job as
     # --codex-config flags (a job's flags win over its own environment).
     codex_config: str = ""
+    # OUTERLOOP_PANEL_CODEX_CONFIG: codex judges' own overrides, applied after
+    # the author's, forwarded with the panel as --panel-codex-config flags.
+    panel_codex_config: str = ""
 
 
 # Generous vs the ~2 h job walltimes plus queue wait, tight enough that
@@ -2429,7 +2432,13 @@ def _climb_panel_argv(spec: ServiceSpec) -> list[str]:
     argv = ["--panel", spec.panel]
     if spec.panel_key_file:
         argv += ["--panel-key-file", spec.panel_key_file]
-    return argv
+    from outerloop.role_runner import codex_config_from_text
+
+    try:
+        entries = codex_config_from_text(spec.panel_codex_config, "OUTERLOOP_PANEL_CODEX_CONFIG")
+    except ValueError:
+        entries = ()  # the preflight refuses a codex lens on it; the job reports it
+    return [*argv, *(arg for entry in entries for arg in ("--panel-codex-config", entry))]
 
 
 def _codex_config_argv(spec: ServiceSpec) -> list[str]:
@@ -2511,12 +2520,15 @@ def _panel_preflight_error(spec: ServiceSpec) -> str:
             return str(exc)
         # non-claude (shelled) lenses: mirror the climb's rules exactly, per
         # backend — image required, the judge's OWN key (set + absolute +
-        # neither the author's nor the claude panel key + readable), and for
-        # hermes its pinned clone.
+        # neither an author's nor the claude panel key + readable), a codex
+        # judge's config, and for hermes its pinned clone and endpoint.
         shelled = {
             "codex": "OUTERLOOP_PANEL_CODEX_KEY_FILE",
             "hermes": "OUTERLOOP_PANEL_HERMES_KEY_FILE",
         }
+        fleet_author = Path(
+            resolve_author_key_file(os.environ.get("OUTERLOOP_AUTHOR_BACKEND") or "claude")
+        ).expanduser()
         for lens_backend, key_env in shelled.items():
             if not any(backend == lens_backend for _, backend, _ in lenses):
                 continue
@@ -2536,12 +2548,16 @@ def _panel_preflight_error(spec: ServiceSpec) -> str:
                 return (
                     f"{lens_backend} panel key path {key_path} is relative; only absolute paths fly"
                 )
-            author = Path(resolve_author_key_file("codex")).expanduser()
-            if key_path.resolve() == author.resolve() or _same_key(key_path, author):
-                return (
-                    f"{lens_backend} panel key file {key_path} is the codex author "
-                    "key (role separation: the judge needs its own key)"
-                )
+            # the OpenAI author key that coexists on the host, and the key the
+            # fleet's author actually holds: by path and by value
+            for author in dict.fromkeys(
+                (Path(resolve_author_key_file("codex")).expanduser(), fleet_author)
+            ):
+                if key_path.resolve() == author.resolve() or _same_key(key_path, author):
+                    return (
+                        f"{lens_backend} panel key file {key_path} holds the author key "
+                        f"in {author} (role separation: the judge needs its own key)"
+                    )
             claude_panel = Path(spec.panel_key_file or PANEL_KEY_DEFAULT).expanduser()
             if key_path.resolve() == claude_panel.resolve() or _same_key(key_path, claude_panel):
                 return (
@@ -2550,6 +2566,14 @@ def _panel_preflight_error(spec: ServiceSpec) -> str:
                     "provider's login)"
                 )
             FileTokenProvider(key_path).token()
+            if lens_backend == "codex":
+                from outerloop.role_runner import codex_config_from_text
+
+                try:
+                    codex_config_from_text(spec.codex_config)
+                    codex_config_from_text(spec.panel_codex_config, "OUTERLOOP_PANEL_CODEX_CONFIG")
+                except ValueError as exc:
+                    return str(exc)
             if lens_backend == "hermes":
                 repo = os.environ.get("REVIEW_HERMES_REPO", "").strip()
                 from outerloop.hermes_install import hermes_ready
@@ -2560,14 +2584,12 @@ def _panel_preflight_error(spec: ServiceSpec) -> str:
                         "run bash scripts/install_hermes.sh "
                         f"{repo or '$REVIEW_HERMES_REPO'}"
                     )
-                from outerloop.role_runner import _HERMES_PROVIDERS
+                from outerloop.attempt import hermes_judge_endpoint
+                from outerloop.role_runner import hermes_endpoint_error
 
-                provider = os.environ.get("REVIEW_HERMES_PROVIDER", "").lower() or "openrouter"
-                if provider not in _HERMES_PROVIDERS:
-                    return (
-                        f"unknown REVIEW_HERMES_PROVIDER {provider!r} "
-                        f"(have: {sorted(_HERMES_PROVIDERS)})"
-                    )
+                endpoint_error = hermes_endpoint_error(*hermes_judge_endpoint())
+                if endpoint_error:
+                    return f"REVIEW_HERMES_PROVIDER/REVIEW_HERMES_BASE_URL: {endpoint_error}"
         if not any(backend == "claude" for _, backend, _ in lenses):
             return ""  # codex-only panel: the claude key checks below don't apply
         if any(not model for _, backend, model in lenses if backend == "claude"):
@@ -3458,6 +3480,7 @@ def _service_spec_from_env(root: Path) -> tuple[Any, ServiceSpec | None]:
                 max_job_minutes=_max_job_minutes_from_env(),
                 has_lanes=compute_from_env().has_lanes,
                 codex_config=os.environ.get("OUTERLOOP_CODEX_CONFIG", ""),
+                panel_codex_config=os.environ.get("OUTERLOOP_PANEL_CODEX_CONFIG", ""),
             )
             return github, service_spec
         except Exception as exc:

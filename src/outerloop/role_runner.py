@@ -18,12 +18,15 @@ from __future__ import annotations
 
 import logging
 import re
+import urllib.parse
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from outerloop.harness import (
+    HERMES_ENDPOINT_KEY_ENV,
+    HERMES_ENDPOINT_PROVIDER,
     ClaudeCodeHarness,
     CodexHarness,
     Harness,
@@ -62,11 +65,48 @@ _HERMES_TOOLSETS = (
 
 # hermes resolves credentials per provider (a registry); "openai" maps to its
 # canonical `openai-api` provider id (api-key auth against api.openai.com —
-# plain "openai" is a provider GROUP there, not an id).
+# plain "openai" is a provider GROUP there, not an id). "custom" is any
+# OpenAI-compatible endpoint (a self-hosted inference server, a managed model
+# API): the harness seeds a named provider entry carrying the endpoint's base
+# URL, and hermes reads the key from the variable that entry names.
 _HERMES_PROVIDERS = {
     "openrouter": ("openrouter", "OPENROUTER_API_KEY"),
     "openai": ("openai-api", "OPENAI_API_KEY"),
+    "custom": (f"custom:{HERMES_ENDPOINT_PROVIDER}", HERMES_ENDPOINT_KEY_ENV),
 }
+
+
+def hermes_endpoint_error(provider: str, base_url: str) -> str:
+    """Why a hermes (provider, base URL) pair cannot run ("" when it can): the
+    one owner of the rules the climb, the tick preflight and init share. The
+    `custom` provider needs an http(s) base URL; the others take none, so a
+    key issued for OpenRouter or OpenAI is never sent to some other host."""
+    name = (provider or "openrouter").strip().lower()
+    if name not in _HERMES_PROVIDERS:
+        return f"unknown hermes provider {provider!r} (have: {sorted(_HERMES_PROVIDERS)})"
+    url = base_url.strip()
+    if name != "custom":
+        if url:
+            return (
+                f"a hermes base URL needs the custom provider, not {name!r}: "
+                f"a {name} key must never be sent to another host"
+            )
+        return ""
+    if not url:
+        return "the custom hermes provider needs a base URL (an OpenAI-compatible endpoint)"
+    parsed = urllib.parse.urlsplit(url)
+    if (
+        parsed.scheme not in ("http", "https")
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or any(c.isspace() or c in "\"'\\" for c in url)
+    ):
+        return (
+            f"hermes base URL {url[:120]!r} is not a plain http(s) URL "
+            "(no credentials, quotes or whitespace in it)"
+        )
+    return ""
 
 
 # Codex `-c KEY=VALUE` overrides for the codex sessions a climb starts. The
@@ -87,13 +127,13 @@ def codex_config_entries(entries: Iterable[str], source: str = "--codex-config")
         entry = raw.strip()
         if not entry:
             continue
-        key, sep, _ = entry.partition("=")
+        key, sep, value = entry.partition("=")
         if not sep or not _CODEX_CONFIG_KEY.fullmatch(key.strip()):
             raise ValueError(
                 f"{source}: {entry[:80]!r} is not a codex KEY=VALUE override "
                 "(KEY is a dotted path such as model_providers.local.base_url)"
             )
-        out.append(f"{key.strip()}={entry[len(key) + 1 :]}")
+        out.append(f"{key.strip()}={value.lstrip()}")
     return tuple(out)
 
 
@@ -134,6 +174,7 @@ def build_harness(
     codex_extra_args: tuple[str, ...] = (),
     hermes_repo: Path | None = None,
     hermes_provider: str = "",
+    hermes_base_url: str = "",
 ) -> Harness:
     """Construct the harness for any role on any backend — the ONE deployment
     wiring (`spec.tools` → native flags, `spec.budget` → turns/walltime,
@@ -149,7 +190,8 @@ def build_harness(
       boundary is the deployment's container or ephemeral runner, exactly as it
       is for every other backend.
     - hermes: toolsets from the spec's execution (`terminal` for a role that
-      executes); provider/key seeded per the registry above.
+      executes); provider/key seeded per the registry above, and the base URL
+      of an OpenAI-compatible endpoint for the `custom` provider.
 
     Containment is NOT decided here: pass `container_image` where the
     deployment has a jail (the cluster), pass none where the runner itself is
@@ -171,9 +213,10 @@ def build_harness(
     if backend == "hermes":
         if hermes_repo is None:
             raise ValueError("hermes backend needs hermes_repo (the pinned clone)")
-        if (hermes_provider or "openrouter") not in _HERMES_PROVIDERS:
-            raise ValueError(f"unknown hermes provider: {hermes_provider!r}")
-        seed, key_env = _HERMES_PROVIDERS[hermes_provider or "openrouter"]
+        endpoint_error = hermes_endpoint_error(hermes_provider, hermes_base_url)
+        if endpoint_error:
+            raise ValueError(endpoint_error)
+        seed, key_env = _HERMES_PROVIDERS[(hermes_provider or "openrouter").strip().lower()]
         # `terminal` (the shell) is keyed on the SAME signal claude uses — the
         # spec granting the Bash tool — not on can_execute, so every backend
         # gives a role the same shell/no-shell whether or not those two ever
@@ -187,6 +230,7 @@ def build_harness(
             repo_dir=hermes_repo,
             provider=seed,
             model=model or "",
+            base_url=hermes_base_url.strip(),
             max_turns=spec.budget.max_turns,
             timeout_s=spec.budget.walltime_s,
             enabled_toolsets=enabled,

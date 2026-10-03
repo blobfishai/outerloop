@@ -153,6 +153,8 @@ def _pr_number(pr_url: str) -> int:
 
 log = logging.getLogger(__name__)
 
+# The panel's own codex `-c` overrides, applied after the author's.
+PANEL_CODEX_CONFIG_ENV = "OUTERLOOP_PANEL_CODEX_CONFIG"
 # Where a climb job reads its keys unless the CLI flags say otherwise. The
 # tick preflights the panel key (and compares it against the author key —
 # role separation) before claiming/submitting.
@@ -3281,21 +3283,35 @@ def resume_run(
     return outcome
 
 
+def _key_value(path: Path) -> str:
+    """The key a file holds, or "" when it cannot be read (the callers that
+    need it readable report that themselves); never raises, never logs it."""
+    from outerloop.github import FileTokenProvider
+
+    try:
+        return FileTokenProvider(path).token()
+    except Exception:
+        return ""
+
+
 def _judge_lens_key(
     *,
     backend: str,
     key_file_env: str,
-    author_backend: str,
+    author_key_files: tuple[str, ...],
     claude_panel_path: Path,
     image: str,
 ) -> str:
     """Resolve a non-claude judge lens's OWN key file, enforcing the three
     separations every shelled judge shares (codex, hermes, any future
     backend): the image is required (a judge never runs uncontained next to
-    key files), the key must be named explicitly, and it must differ from BOTH
-    the author's key of the same provider AND the claude panel key (a
-    cross-provider send would leak an anthropic credential to another login).
-    Returns the redacted key (or "" under an ADC-covered deployment)."""
+    key files), the key must be named explicitly, and it must differ from
+    every author key file in play AND from the claude panel key (a
+    cross-provider send would leak an anthropic credential to another login,
+    so that one is compared by VALUE too: a copy is still the anthropic key).
+    A judge key whose VALUE equals the author's is the caller's to handle
+    (the climb refuses it, a wake skips the panel). Returns the key
+    (redaction joins it to the secret set)."""
     if not image:
         raise ValueError(
             f"a {backend} panel lens requires --image (a shelled judge only "
@@ -3308,22 +3324,56 @@ def _judge_lens_key(
             "(role separation: the judge's own key, never the author's)"
         )
     path = Path(raw).expanduser()
-    author_path = Path(resolve_author_key_file(author_backend)).expanduser()
-    if path.resolve() == author_path.resolve():
-        raise ValueError(
-            f"{backend} panel key file {path} is the {author_backend} author key "
-            "(role separation: the judge needs its own key)"
-        )
+    authors = tuple(dict.fromkeys(Path(f).expanduser() for f in author_key_files if f))
+    for author_path in authors:
+        if path.resolve() == author_path.resolve():
+            raise ValueError(
+                f"{backend} panel key file {path} is the author key file {author_path} "
+                "(role separation: the judge needs its own key)"
+            )
     if path.resolve() == claude_panel_path.resolve():
         raise ValueError(
             f"{backend} panel key file {path} is the claude panel key file "
             "(an anthropic key must never reach another provider's login)"
         )
-    return role_key(raw, author_backend)
+    key = role_key(raw, backend)
+    if key and key == _key_value(claude_panel_path):
+        raise ValueError(
+            f"{backend} panel key file {path} holds the claude panel key "
+            "(an anthropic key must never reach another provider's login)"
+        )
+    return key
+
+
+def _judge_codex_args(args: Any) -> tuple[str, ...]:
+    """A codex judge's `-c` overrides: the author's codex config (host settings
+    and provider definitions every codex session on this deployment needs),
+    then the panel's own (--panel-codex-config / OUTERLOOP_PANEL_CODEX_CONFIG),
+    which codex applies last, so it wins for any key both set — pointing the
+    judges at another endpoint, for example. A malformed value raises."""
+    for error in (
+        getattr(args, "codex_config_error", ""),
+        getattr(args, "panel_codex_config_error", ""),
+    ):
+        if error:
+            raise ValueError(error)
+    return (*getattr(args, "codex_extra", ()), *getattr(args, "panel_codex_extra", ()))
+
+
+def hermes_judge_endpoint() -> tuple[str, str]:
+    """`(provider, base URL)` for hermes judges: REVIEW_HERMES_PROVIDER
+    (openrouter, openai, or custom for an OpenAI-compatible endpoint) and
+    REVIEW_HERMES_BASE_URL, which only the custom provider takes."""
+    provider = os.environ.get("REVIEW_HERMES_PROVIDER", "").strip().lower() or "openrouter"
+    return provider, os.environ.get("REVIEW_HERMES_BASE_URL", "").strip()
 
 
 def _panel_lenses_from_args(
-    args: Any, *, author_backend: str | None = None, author_model: str | None = None
+    args: Any,
+    *,
+    author_backend: str | None = None,
+    author_model: str | None = None,
+    author_key_file: str | None = None,
 ) -> tuple[tuple[PanelLens, ...], tuple[str, ...]]:
     """Build the verification-panel lenses from the CLI args (empty `--panel`
     disables it), returning `(lenses, panel_secrets)` — the ONE owner of
@@ -3345,6 +3395,11 @@ def _panel_lenses_from_args(
         author_backend = getattr(args, "author_backend", "") or "claude"
     if author_model is None:
         author_model = getattr(args, "model", "") or ""
+    if author_key_file is None:
+        author_key_file = getattr(args, "key_file", "") or resolve_author_key_file(author_backend)
+    # a shelled judge's key differs from the OpenAI author key that coexists
+    # on the host, and from the key this run's author actually holds
+    author_keys = (resolve_author_key_file("codex"), author_key_file)
     parsed = resolve_lenses(args.panel, author_backend, author_model)
     # the anthropic panel key is read only when a claude lens will use it —
     # a codex-only panel must not demand an unrelated credential
@@ -3353,36 +3408,41 @@ def _panel_lenses_from_args(
     secrets: list[str] = [panel_key] if panel_key else []
     for kind, backend, model in parsed:
         hermes_repo_env = os.environ.get("REVIEW_HERMES_REPO", "").strip()
+        hermes_provider, hermes_base_url = hermes_judge_endpoint()
+        codex_args: tuple[str, ...] = ()
         # per-backend judge keys coexist — a codex lens is never handed the
         # anthropic panel key, and role separation forbids defaulting to the
-        # AUTHOR's codex key: the judge key is its own, named explicitly
+        # AUTHOR's key: the judge key is its own, named explicitly
         claude_panel_path = Path(args.panel_key_file or PANEL_KEY_DEFAULT).expanduser()
-        if backend == "codex":
-            lens_key = _judge_lens_key(
-                backend="codex",
-                key_file_env="OUTERLOOP_PANEL_CODEX_KEY_FILE",
-                author_backend="codex",
-                claude_panel_path=claude_panel_path,
-                image=args.image,
-            )
-            if lens_key:
-                secrets.append(lens_key)
-        elif backend == "hermes":
-            # hermes reads its key from its provider's env var, but the FILE
-            # is resolved and separated exactly like codex's (the key still
-            # lands next to the session). The author's OpenAI key coexists, so
-            # separate against the codex author key.
-            lens_key = _judge_lens_key(
-                backend="hermes",
-                key_file_env="OUTERLOOP_PANEL_HERMES_KEY_FILE",
-                author_backend="codex",
-                claude_panel_path=claude_panel_path,
-                image=args.image,
-            )
-            if lens_key:
-                secrets.append(lens_key)
-        else:
-            lens_key = panel_key
+        try:
+            if backend == "codex":
+                codex_args = _judge_codex_args(args)
+                lens_key = _judge_lens_key(
+                    backend="codex",
+                    key_file_env="OUTERLOOP_PANEL_CODEX_KEY_FILE",
+                    author_key_files=author_keys,
+                    claude_panel_path=claude_panel_path,
+                    image=args.image,
+                )
+                if lens_key:
+                    secrets.append(lens_key)
+            elif backend == "hermes":
+                # hermes reads its key from its provider's env var, but the
+                # FILE is resolved and separated exactly like codex's (the key
+                # still lands next to the session)
+                lens_key = _judge_lens_key(
+                    backend="hermes",
+                    key_file_env="OUTERLOOP_PANEL_HERMES_KEY_FILE",
+                    author_key_files=author_keys,
+                    claude_panel_path=claude_panel_path,
+                    image=args.image,
+                )
+                if lens_key:
+                    secrets.append(lens_key)
+            else:
+                lens_key = panel_key
+        except ValueError as exc:
+            raise ValueError(f"panel entry {kind}:{backend}: {exc}") from exc
         try:
             if not args.image:
                 log.warning(
@@ -3401,8 +3461,10 @@ def _panel_lenses_from_args(
                 # so it must run inside the image. The shared resolver admits
                 # only backends that can be contained here.
                 container_image=args.image,
+                codex_extra_args=codex_args,
                 hermes_repo=Path(hermes_repo_env) if hermes_repo_env else None,
-                hermes_provider=os.environ.get("REVIEW_HERMES_PROVIDER", "openrouter"),
+                hermes_provider=hermes_provider,
+                hermes_base_url=hermes_base_url,
             )
         except (ValueError, ClaudeModelUnset) as exc:
             raise ValueError(f"panel entry {kind}:{backend}: {exc}") from exc
@@ -5120,6 +5182,15 @@ def main() -> int:
         help="key file for panel judge sessions (the verifier's own key, never the author's)",
     )
     parser.add_argument(
+        "--panel-codex-config",
+        action="append",
+        default=None,
+        metavar="KEY=VALUE",
+        help="codex `-c KEY=VALUE` config for codex panel judges (repeatable), applied "
+        "after the author's codex config so it wins for a key both set. Default: "
+        "OUTERLOOP_PANEL_CODEX_CONFIG, entries separated by ';'.",
+    )
+    parser.add_argument(
         "--job-minutes",
         type=int,
         default=0,
@@ -5170,8 +5241,12 @@ def main() -> int:
     # claude run must not die (and count toward STUCK) on a codex setting.
     codex_extra, codex_config_error = _resolve_codex_config(args.codex_config)
     args.codex_extra, args.codex_config_error = codex_extra, codex_config_error
-    if codex_config_error:
-        log.warning("%s; a codex session in this job refuses to start", codex_config_error)
+    args.panel_codex_extra, args.panel_codex_config_error = _resolve_codex_config(
+        args.panel_codex_config, PANEL_CODEX_CONFIG_ENV, "--panel-codex-config"
+    )
+    for _config_error in (codex_config_error, args.panel_codex_config_error):
+        if _config_error:
+            log.warning("%s; a codex session in this job refuses to start", _config_error)
 
     bot_auth = resolve_bot_auth(args.pat_file, args.github_app_file)
 
@@ -5239,7 +5314,10 @@ def main() -> int:
                 ((), ())
                 if args.panel_skip
                 else _panel_lenses_from_args(
-                    args, author_backend=wake_backend, author_model=wake_model
+                    args,
+                    author_backend=wake_backend,
+                    author_model=wake_model,
+                    author_key_file=wake_key_file,
                 )
             )
         except ValueError as exc:
@@ -5384,10 +5462,20 @@ def main() -> int:
     # identity from the author). kind[:backend[:model]]; claude by default.
     try:
         panel_lenses, panel_secrets = _panel_lenses_from_args(
-            args, author_backend=args.author_backend, author_model=args.model
+            args,
+            author_backend=args.author_backend,
+            author_model=args.model,
+            author_key_file=args.key_file,
         )
     except ValueError as exc:
         parser.error(str(exc))
+    if api_key and api_key in panel_secrets:
+        # the tick preflight compares key VALUES before it queues a climb; a
+        # climb started by hand gets the same refusal (a wake skips the panel)
+        parser.error(
+            "a panel judge key holds the author's key (role separation: every "
+            "judge needs its own key)"
+        )
 
     # The compute backend always exists (Slurm, or local); containment was
     # settled by --image/--uncontained above. Account and partition are

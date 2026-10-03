@@ -150,9 +150,9 @@ if [ -n "$ENV_TRUSTED" ]; then
                   OUTERLOOP_QOS OUTERLOOP_APPTAINER_BIN \
                   OUTERLOOP_IMAGE \
                   OUTERLOOP_PANEL OUTERLOOP_PANEL_KEY_FILE \
-                  OUTERLOOP_PANEL_CODEX_KEY_FILE \
+                  OUTERLOOP_PANEL_CODEX_KEY_FILE OUTERLOOP_PANEL_CODEX_CONFIG \
                   OUTERLOOP_PANEL_HERMES_KEY_FILE \
-                  REVIEW_HERMES_REPO REVIEW_HERMES_PROVIDER; do
+                  REVIEW_HERMES_REPO REVIEW_HERMES_PROVIDER REVIEW_HERMES_BASE_URL; do
         env_line
         # PRESENCE-based, not value-based: a key set to "" in .env is a
         # live OFF-SWITCH (OUTERLOOP_PANEL="" disables the panel,

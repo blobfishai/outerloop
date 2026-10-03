@@ -926,6 +926,9 @@ def main(argv: list[str] | None = None) -> int:
             "REVIEW_MODEL",
             "REVIEW_HERMES_PROVIDER",
             "REVIEW_HERMES_REPO",
+            "REVIEW_HERMES_BASE_URL",
+            "OUTERLOOP_CODEX_CONFIG",
+            "OUTERLOOP_PANEL_CODEX_CONFIG",
         )
         for key in judge_keys:
             if key in os.environ:
