@@ -362,7 +362,11 @@ identity from 2b, the Claude model (`OUTERLOOP_CLAUDE_MODEL`, required for
 every Claude role), and the author's model key, and writes
 `~/.config/outerloop/.env` (all `0600`) — everything the prose below otherwise
 sets by hand. The rest of this section documents what it writes, for when
-you'd rather set it directly.
+you'd rather set it directly. Rerunning `outerloop init --force` rewrites only
+what it asks about (placement, target, auth, the author and Claude models, the
+image, and the author's key file and harness path when it finds them); every
+other line of the existing `.env`, such as the panel's settings, the judges' key
+files, `OUTERLOOP_POST_TRANSCRIPTS` or Vertex billing, is kept.
 
 The orchestrator is CPU-only and makes outbound connections only. Anywhere
 that can reach GitHub and your LLM provider works.
@@ -761,7 +765,9 @@ open-weights models) instead of a vendor's own API.
   author runs contained, with the file and terminal toolsets, and resumes
   across wakes from its saved transcript. Live session events and the
   session-control writer record cover Claude and Codex authors only. A lens
-  that names no backend runs on Hermes for a Hermes author.
+  that names no backend runs on Hermes for a Hermes author. When the endpoint
+  is down, throttled or refuses connections, the run ends as an outage and the
+  lanes pause, rather than launching more runs into the endpoint.
 - **Codex author.** Define the endpoint as a codex model provider in
   `OUTERLOOP_CODEX_CONFIG`, for example
   `model_provider=local;model_providers.local.name=local;model_providers.local.base_url=https://models.example.com/v1;model_providers.local.env_key=OPENAI_API_KEY`,
@@ -775,7 +781,12 @@ open-weights models) instead of a vendor's own API.
   with the base URL into the session's private hermes config and passes the key
   only through the session environment. A base URL is accepted only with the
   `custom` provider, so an OpenRouter or OpenAI key is never sent to another
-  host.
+  host. With neither setting, hermes judges run on OpenRouter, except for a
+  Hermes author on another provider: its judges, including the default
+  `verify,review` lenses that run the author's model, would send its claim
+  and the judge key to OpenRouter, so the climb and the tick refuse until
+  `REVIEW_HERMES_PROVIDER` (and `REVIEW_HERMES_BASE_URL` for `custom`) names
+  where the judges run, for example the author's own endpoint.
 - **Codex judges.** Codex reads model providers from its config, so codex
   judges run with the author's `OUTERLOOP_CODEX_CONFIG` followed by
   `OUTERLOOP_PANEL_CODEX_CONFIG`. Codex applies `-c` overrides in order, so the
@@ -786,6 +797,23 @@ open-weights models) instead of a vendor's own API.
 The judge keys stay separate from the author's. The tick compares key values,
 not only paths, before it queues a climb; a climb started by hand refuses a
 judge key that holds the author's key, and a wake skips the panel instead.
+
+Keys live only in key files. A base URL is not a secret: it appears in the
+session's command line, its config and its logs, so `OUTERLOOP_HERMES_BASE_URL`
+and `REVIEW_HERMES_BASE_URL` must be plain http(s) URLs, and one with a user,
+password, query string or fragment is refused without being repeated in the
+error. `OUTERLOOP_CODEX_CONFIG` and `OUTERLOOP_PANEL_CODEX_CONFIG` reach job
+command lines, `wake-spec.json` and (the author's) every codex judge, so they
+refuse `experimental_bearer_token`, a command-backed `auth` table, a static
+`http_headers` or `query_params` entry named like a credential (`Authorization`,
+`api-key`, `token`, ...) and a `base_url` with a user, password, query string
+or fragment. Use `env_key` (or `env_http_headers`) instead.
+
+A run records the endpoint its author started on: a Hermes author's provider
+and base URL, a Codex author's provider, profile and base URL overrides. Its
+wakes use that endpoint with the run's own key file, so moving the deployment
+to another endpoint never sends a parked run's key or conversation there; new
+runs start on the new endpoint. Other codex settings follow the deployment.
 
 ## Keeping session text off GitHub
 
@@ -804,6 +832,15 @@ is present, only `1`, `on`, `true` or `yes` post it. An empty value is an
 off-switch, as `OUTERLOOP_PANEL=""` is for the panel, and any other value (a
 typo, a trailing comment) keeps the text off too and is logged.
 
+Every job reads the setting from `~/.config/outerloop/.env` each time it posts,
+as well as from its own environment, and either one switching it off keeps the
+text off. A job keeps the environment it was submitted with, and a parked run
+submits its next wake from its own job, so the `.env` is what carries an
+off-switch to runs already in flight, from their next post on. A `.env` that
+exists but is not yours or is group- or world-writable (the deploy step refuses
+to read it) keeps the text off as well. Setting it back on in the `.env` takes
+effect for jobs whose environment does not switch it off.
+
 The switch does not cover:
 
 - the author's replies to review comments, which are messages it addresses to
@@ -811,8 +848,7 @@ The switch does not cover:
 - the code it pushes, and the notebook a research-line author keeps on its line
   branch, which is the line's working memory;
 - the experiments table's launch names and the last line each job printed;
-- text published before the switch was set, and jobs queued before it was set,
-  which keep the environment they were submitted with.
+- text published before the switch was set.
 
 An older kernel ignores the setting, so roll back only with this in mind.
 

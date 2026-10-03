@@ -90,3 +90,15 @@ def _no_result_settle(monkeypatch):
     tests that want the wait set it explicitly."""
     monkeypatch.setattr("outerloop.measure.RESULT_SETTLE_S", 0.0)
     monkeypatch.setattr("outerloop.measure.RESULT_POLL_S", 0.0)
+
+
+@pytest.fixture(autouse=True)
+def _no_operator_env_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """Code that reads the operator's .env at use time (the transcript switch)
+    must not read the developer's own ~/.config/outerloop/.env: tests run with
+    no such file unless they point paths.ENV_FILE at one."""
+    monkeypatch.setattr(
+        "outerloop.paths.ENV_FILE", tmp_path_factory.getbasetemp() / "no-operator-env" / ".env"
+    )

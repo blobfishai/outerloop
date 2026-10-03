@@ -79,11 +79,17 @@ _HERMES_PROVIDERS = {
 def hermes_endpoint_error(provider: str, base_url: str) -> str:
     """Why a hermes (provider, base URL) pair cannot run ("" when it can): the
     one owner of the rules the climb, the tick preflight and init share. The
-    `custom` provider needs an http(s) base URL; the others take none, so a
-    key issued for OpenRouter or OpenAI is never sent to some other host."""
+    `custom` provider needs a plain http(s) base URL; the others take none, so
+    a key issued for OpenRouter or OpenAI is never sent to some other host.
+
+    The answer reaches logs, job command lines, pull requests, issues and the
+    author's inbox, and a refused value may hold a credential, so it never
+    repeats the URL: it names only the scheme and host of a URL that has them,
+    and a provider only when it reads as a provider name."""
     name = (provider or "openrouter").strip().lower()
     if name not in _HERMES_PROVIDERS:
-        return f"unknown hermes provider {provider!r} (have: {sorted(_HERMES_PROVIDERS)})"
+        shown = f" {name!r}" if re.fullmatch(r"[a-z0-9_-]{1,24}", name) else ""
+        return f"unknown hermes provider{shown} (have: {sorted(_HERMES_PROVIDERS)})"
     url = base_url.strip()
     if name != "custom":
         if url:
@@ -94,18 +100,30 @@ def hermes_endpoint_error(provider: str, base_url: str) -> str:
         return ""
     if not url:
         return "the custom hermes provider needs a base URL (an OpenAI-compatible endpoint)"
-    parsed = urllib.parse.urlsplit(url)
-    if (
-        parsed.scheme not in ("http", "https")
-        or not parsed.hostname
-        or parsed.username
-        or parsed.password
-        or any(c.isspace() or c in "\"'\\" for c in url)
-    ):
-        return (
-            f"hermes base URL {url[:120]!r} is not a plain http(s) URL "
-            "(no credentials, quotes or whitespace in it)"
-        )
+    return _plain_url_error(url, "the hermes base URL")
+
+
+def _plain_url_error(url: str, what: str) -> str:
+    """Why `url` is not a plain http(s) endpoint URL ("" when it is). A plain
+    URL has a host and no user, password, query string or fragment, which is
+    where credentials hide, and no quotes, backslashes or whitespace. `url` is
+    never quoted back (see hermes_endpoint_error): a refusal names `what` and,
+    once the URL parses as http(s) with a host, that scheme and host."""
+    plain = "is not a plain http(s) URL"
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host = parts.hostname or ""
+    except ValueError:
+        return f"{what} {plain} (it does not parse)"
+    if parts.scheme not in ("http", "https") or not host:
+        return f"{what} {plain} with a host"
+    where = f"{what} for {parts.scheme}://{host}"
+    if "@" in parts.netloc:
+        return f"{where} {plain}: it carries a user or password (a key belongs in the key file)"
+    if "?" in url or "#" in url:
+        return f"{where} {plain}: it has a query string or fragment (a key belongs in the key file)"
+    if any(c.isspace() or c in "\"'\\" for c in url):
+        return f"{where} {plain}: it holds a quote, backslash or whitespace"
     return ""
 
 
@@ -117,23 +135,86 @@ def hermes_endpoint_error(provider: str, base_url: str) -> str:
 CODEX_CONFIG_ENV = "OUTERLOOP_CODEX_CONFIG"
 _CODEX_CONFIG_KEY = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*")
 
+# A codex config never carries a credential. It reaches job command lines
+# (argv is world-readable on a shared node) and wake-spec.json, and the panel's
+# codex judges receive the author's config, so a credential in it would be
+# readable by other users and would let every judge authenticate as the
+# author. A provider's key reaches a session only from its role's key file,
+# through the provider's `env_key`. Refused (codex 0.130.0's provider fields):
+# a static bearer token, a command-backed `auth` table, a static header or
+# query parameter whose name reads as a credential, and a base URL with a user,
+# password, query string or fragment.
+_CODEX_CREDENTIAL_FIELDS = frozenset({"experimental_bearer_token", "bearer_token", "auth"})
+_CODEX_LITERAL_MAPS = frozenset({"http_headers", "query_params"})
+_CREDENTIAL_NAME = re.compile(
+    r"auth|token|secret|passw|api[-_]?key|cookie|credential|signature|[-_]key$|^key$|^sig$|^code$"
+)
+
+
+def _codex_credential(path: tuple[str, ...], value: object) -> str:
+    """The dotted path of a credential the override `path` = `value` would
+    set, or "". `value` is the override's parsed TOML: an inline table is
+    searched like the dotted keys it stands for."""
+    names = [part.lower() for part in path]
+    for i, name in enumerate(names):
+        if name in _CODEX_CREDENTIAL_FIELDS:
+            return ".".join(path[: i + 1])
+        named = names[i + 1] if i + 1 < len(names) else ""
+        if name in _CODEX_LITERAL_MAPS and named and _CREDENTIAL_NAME.search(named):
+            return ".".join(path[: i + 2])
+    if isinstance(value, dict):
+        for key, sub in value.items():
+            found = _codex_credential((*path, str(key)), sub)
+            if found:
+                return found
+        return ""
+    if names and names[-1].endswith("base_url") and isinstance(value, str):
+        try:
+            netloc = urllib.parse.urlsplit(value).netloc
+        except ValueError:
+            netloc = ""
+        if "@" in netloc or "?" in value or "#" in value:
+            return ".".join(path)
+    return ""
+
+
+def _toml_value(raw: str) -> object:
+    """An override's value as codex reads it: TOML, else the plain string."""
+    import tomllib
+
+    try:
+        return tomllib.loads(f"v = {raw}")["v"]
+    except tomllib.TOMLDecodeError:
+        return raw
+
 
 def codex_config_entries(entries: Iterable[str], source: str = "--codex-config") -> tuple[str, ...]:
     """Validated codex config overrides, in order (codex applies them in order,
     so a later entry for the same key wins). Blank entries are dropped; an
-    entry that is not `KEY=VALUE` raises ValueError naming `source`."""
+    entry that is not `KEY=VALUE`, or that would carry a credential (see
+    _CODEX_CREDENTIAL_FIELDS), raises ValueError naming `source`. The error
+    names a malformed entry by its position and a refused one by its key,
+    never by its text: a mistyped entry may hold the credential itself."""
     out: list[str] = []
     for raw in entries:
         entry = raw.strip()
         if not entry:
             continue
         key, sep, value = entry.partition("=")
-        if not sep or not _CODEX_CONFIG_KEY.fullmatch(key.strip()):
+        key = key.strip()
+        if not sep or not _CODEX_CONFIG_KEY.fullmatch(key):
             raise ValueError(
-                f"{source}: {entry[:80]!r} is not a codex KEY=VALUE override "
+                f"{source}: entry {len(out) + 1} is not a codex KEY=VALUE override "
                 "(KEY is a dotted path such as model_providers.local.base_url)"
             )
-        out.append(f"{key.strip()}={value.lstrip()}")
+        found = _codex_credential(tuple(key.split(".")), _toml_value(value.strip()))
+        if found:
+            raise ValueError(
+                f"{source}: {found!r} would put a credential in the codex config, which "
+                "reaches job command lines and every codex session it configures; a "
+                "provider's key comes from its role's key file through env_key"
+            )
+        out.append(f"{key}={value.lstrip()}")
     return tuple(out)
 
 

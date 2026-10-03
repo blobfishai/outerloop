@@ -39,6 +39,80 @@ def test_malformed_entries_are_refused_with_their_source(entry: str) -> None:
         codex_config_entries([entry])
 
 
+def test_a_malformed_entry_is_named_by_position_never_by_its_text() -> None:
+    """A mistyped entry may be the credential itself, and the error reaches
+    logs and the tick's alarm issue."""
+    with pytest.raises(ValueError, match="entry 2") as caught:
+        codex_config_from_text("ok=1;Authorization: Bearer tok-SECRET")
+    assert "tok-SECRET" not in str(caught.value)
+
+
+TOKEN = "tok-AUTHOR-0123456789"
+
+
+@pytest.mark.parametrize(
+    ("entry", "refused"),
+    [
+        (
+            f'model_providers.vllm.experimental_bearer_token="{TOKEN}"',
+            "model_providers.vllm.experimental_bearer_token",
+        ),
+        (
+            f'model_providers.vllm={{ name = "v", base_url = "https://m.example/v1", '
+            f'experimental_bearer_token = "{TOKEN}" }}',
+            "model_providers.vllm.experimental_bearer_token",
+        ),
+        (
+            f'model_providers.vllm.http_headers.Authorization="Bearer {TOKEN}"',
+            "model_providers.vllm.http_headers.Authorization",
+        ),
+        (
+            f'model_providers.vllm.http_headers={{ "X-Api-Key" = "{TOKEN}" }}',
+            "model_providers.vllm.http_headers.X-Api-Key",
+        ),
+        (
+            f'model_providers.vllm.query_params.key="{TOKEN}"',
+            "model_providers.vllm.query_params.key",
+        ),
+        (
+            f'model_providers.vllm.auth={{ command = "echo", args = ["{TOKEN}"] }}',
+            "model_providers.vllm.auth",
+        ),
+        (
+            f'model_providers.vllm.base_url="https://u:{TOKEN}@m.example/v1"',
+            "model_providers.vllm.base_url",
+        ),
+        (
+            f"model_providers.vllm.base_url=https://m.example/v1?key={TOKEN}",
+            "model_providers.vllm.base_url",
+        ),
+        (f'mcp_servers.docs.bearer_token="{TOKEN}"', "mcp_servers.docs.bearer_token"),
+    ],
+)
+def test_a_credential_in_the_codex_config_is_refused(entry: str, refused: str) -> None:
+    """The config reaches job command lines, wake-spec.json and the panel's
+    codex judges: a credential in it would be world-readable and would let a
+    judge authenticate as the author. Keys come from key files via env_key."""
+    with pytest.raises(ValueError, match="credential") as caught:
+        codex_config_from_text(f"model_provider=vllm;{entry}")
+    assert refused in str(caught.value) and TOKEN not in str(caught.value)
+    with pytest.raises(ValueError, match="--panel-codex-config"):
+        codex_config_entries([entry], "--panel-codex-config")
+
+
+def test_provider_settings_without_a_credential_pass() -> None:
+    entries = (
+        "model_provider=local",
+        'model_providers.local.base_url="https://models.example.com/v1"',
+        "model_providers.local.env_key=OPENAI_API_KEY",
+        "model_providers.local.env_http_headers.Authorization=OPENAI_API_KEY",
+        'model_providers.local.http_headers.X-Title="outerloop"',
+        'model_providers.azure.query_params={ api-version = "2025-04-01-preview" }',
+        "model_auto_compact_token_limit=200000",
+    )
+    assert codex_config_from_text(";".join(entries)) == entries
+
+
 def test_value_may_hold_equals_signs_and_spaces() -> None:
     # `key = value` reads naturally; codex gets `key=value` (TOML has no
     # leading blank), and the value keeps its own "=" and inner spaces
@@ -180,6 +254,95 @@ def test_a_codex_wake_on_a_malformed_value_hands_its_lease_back(
         climb_mod.main()
     assert "OUTERLOOP_CODEX_CONFIG" in capsys.readouterr().err
     assert read_lease(tmp_path, run_id) is None  # released, not stranded until the TTL
+
+
+ROUTED = 'model_provider=local;model_providers.local.base_url="https://a.example/v1"'
+
+
+def test_a_fresh_climb_records_where_its_codex_author_is_served(climb, monkeypatch) -> None:
+    monkeypatch.setenv("OUTERLOOP_CODEX_CONFIG", f"use_legacy_landlock=true;{ROUTED}")
+    monkeypatch.setattr("sys.argv", climb["argv"])
+    assert climb_mod.main() == 0
+    assert climb["live"]["author_endpoint"] == {
+        "codex_config": 'model_provider=local\nmodel_providers.local.base_url="https://a.example/v1"'
+    }
+
+
+def _codex_wake(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **fields: Any) -> Any:
+    """Park a codex run with `fields` on its record, wake it under the
+    environment's codex config, and return the author harness it built."""
+    from outerloop.runstate import RunRecord, acquire_lease, save_record
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    key = tmp_path / "codex_key"
+    key.write_text("sk-codex-author\n")
+    key.chmod(0o600)
+    pat = tmp_path / "pat"
+    pat.write_text("ghp_x\n")
+    pat.chmod(0o600)
+    image = tmp_path / "img.sif"
+    image.write_text("")
+    run_id = "b-codex"
+    save_record(
+        tmp_path,
+        RunRecord(
+            run_id=run_id,
+            target="o/r",
+            task_title="t",
+            benchmark="b",
+            state="parked",
+            deadline=NOW + 3600,
+            stage={"phase": "author-sleep", "candidate_sha": "abc"},
+            author_backend="codex",
+            author_model="gpt-test",
+            author_key_file=str(key),
+            **fields,
+        ),
+        NOW,
+    )
+    assert acquire_lease(tmp_path, run_id, "wake-job:1", "1", NOW)
+    monkeypatch.setenv("SLURM_JOB_ID", "1")
+    monkeypatch.delenv("OUTERLOOP_DISPATCH_WAKE", raising=False)
+    monkeypatch.setattr(climb_mod, "arm_sigterm_containment", lambda: None)
+    seen: dict[str, Any] = {}
+
+    def fake_resume(*args: Any, **kwargs: Any) -> climb_mod.AttemptOutcome:
+        seen.update(kwargs)
+        return climb_mod.AttemptOutcome(run_id=run_id, outcome="parked")
+
+    monkeypatch.setattr(climb_mod, "resume_run", fake_resume)
+    argv = ["climb", "--resume", run_id, "--run-root", str(tmp_path), "--image", str(image)]
+    monkeypatch.setattr("sys.argv", [*argv, "--pat-file", str(pat), "--panel", ""])
+    assert climb_mod.main() == 0
+    return seen["harness"]
+
+
+def test_a_codex_wake_keeps_the_endpoint_its_run_started_on(tmp_path, monkeypatch) -> None:
+    """The fleet's codex config now routes to OpenAI: a run parked on the
+    deployment's own endpoint wakes there, its conversation and key never sent
+    to the new host, while host settings follow the fleet."""
+    monkeypatch.setenv("OUTERLOOP_CODEX_CONFIG", "use_legacy_landlock=true;model_provider=openai")
+    recorded = {"codex_config": ROUTED.replace(";", "\n")}
+    harness = _codex_wake(tmp_path, monkeypatch, author_endpoint=recorded)
+    assert harness.api_key == "sk-codex-author"
+    assert harness.extra_args[:6] == (
+        "-c",
+        "use_legacy_landlock=true",
+        "-c",
+        "model_provider=local",
+        "-c",
+        'model_providers.local.base_url="https://a.example/v1"',
+    )
+
+
+def test_a_codex_run_on_the_default_endpoint_is_not_rerouted(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("OUTERLOOP_CODEX_CONFIG", f"use_legacy_landlock=true;{ROUTED}")
+    harness = _codex_wake(tmp_path, monkeypatch, author_endpoint={"codex_config": ""})
+    assert "model_provider=local" not in harness.extra_args
+    assert harness.extra_args[:2] == ("-c", "use_legacy_landlock=true")
+    # a run that recorded nothing (older than the record) takes the fleet's config
+    legacy = _codex_wake(tmp_path / "legacy", monkeypatch)
+    assert "model_provider=local" in legacy.extra_args
 
 
 # ------------------------------------------------------------------ the tick

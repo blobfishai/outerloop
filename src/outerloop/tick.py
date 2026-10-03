@@ -2589,12 +2589,16 @@ def _panel_preflight_error(spec: ServiceSpec) -> str:
                         "run bash scripts/install_hermes.sh "
                         f"{repo or '$REVIEW_HERMES_REPO'}"
                     )
-                from outerloop.attempt import hermes_judge_endpoint
-                from outerloop.role_runner import hermes_endpoint_error
+                from outerloop.attempt import hermes_author_endpoint, hermes_judge_endpoint_error
 
-                endpoint_error = hermes_endpoint_error(*hermes_judge_endpoint())
+                # the fleet's author: judges of a hermes author on its own
+                # endpoint never fall back to OpenRouter unnamed
+                endpoint_error = hermes_judge_endpoint_error(
+                    os.environ.get("OUTERLOOP_AUTHOR_BACKEND", "").strip() or "claude",
+                    hermes_author_endpoint()[0],
+                )
                 if endpoint_error:
-                    return f"REVIEW_HERMES_PROVIDER/REVIEW_HERMES_BASE_URL: {endpoint_error}"
+                    return endpoint_error
         if not any(backend == "claude" for _, backend, _ in lenses):
             return ""  # codex-only panel: the claude key checks below don't apply
         if any(not model for _, backend, model in lenses if backend == "claude"):

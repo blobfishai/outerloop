@@ -59,12 +59,37 @@ def _key(path: Path, value: str) -> Path:
         ("custom", 'https://models.example.com/v1"', "plain http(s)"),
         ("custom", "https://models.example.com/v 1", "plain http(s)"),
         ("custom", "https:///v1", "plain http(s)"),
+        ("custom", "https://models.example.com/v1?api_key=k", "query string"),
+        ("custom", "https://models.example.com/v1#k", "query string or fragment"),
+        ("custom", "https://@models.example.com/v1", "user or password"),
+        ("custom", "http://[::1/v1", "does not parse"),
         ("wat", "", "unknown hermes provider"),
     ],
 )
 def test_hermes_endpoint_rules(provider: str, url: str, problem: str) -> None:
     error = hermes_endpoint_error(provider, url)
     assert (problem in error) if problem else error == ""
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://judge:S3CRET@vllm.example/v1",
+        "https://S3CRET@vllm.example/v1",
+        "https://:S3CRET@vllm.example/v1",
+        "https://vllm.example/v1?api_key=S3CRET",
+        "https://vllm.example/v1#S3CRET",
+        "judge:S3CRET@vllm.example/v1",
+        "S3CRET://vllm.example/v1",
+        "https://vllm.example/v1 S3CRET",
+    ],
+)
+def test_a_refused_endpoint_is_never_repeated(url: str) -> None:
+    """The refusal reaches logs, job argv, the tick's alarm issue, PR bodies
+    and the author's inbox: it names the scheme and host, never the URL."""
+    error = hermes_endpoint_error("custom", url)
+    assert error and "S3CRET" not in error and "judge" not in error
+    assert "S3CRET" not in hermes_endpoint_error("sk-or-S3CRET-0123456789abcdefghijklmnop", "")
 
 
 def test_build_harness_points_a_custom_hermes_at_its_endpoint(tmp_path: Path) -> None:
@@ -399,3 +424,64 @@ def test_wake_spec_carries_the_panel_codex_config(tmp_path) -> None:
     (tmp_path / WAKE_SPEC_NAME).write_text(json.dumps(legacy))
     loaded = load_wake_spec(tmp_path)
     assert loaded is not None and loaded.panel_codex_config == ""
+
+
+def test_the_authors_bearer_token_never_reaches_a_codex_judge(judge_env, monkeypatch) -> None:
+    """The deployment the review describes: a bearer token in the author's
+    codex config would authenticate every codex judge as the author, beside
+    the judge's own key, and ride the job command lines. The tick, the climb
+    and the judge all refuse it, and no message repeats it."""
+    from outerloop.tick import _author_config_error, _codex_config_argv, _panel_preflight_error
+
+    config = (
+        'model_provider=vllm;model_providers.vllm.base_url="https://models.example.com/v1";'
+        'model_providers.vllm.experimental_bearer_token="tok-AUTHOR"'
+    )
+    spec = _spec(judge_env, panel="review:codex:judge-model", codex_config=config)
+    monkeypatch.setenv("OUTERLOOP_AUTHOR_BACKEND", "codex")
+    monkeypatch.setenv("OUTERLOOP_AUTHOR_MODEL", "gpt-test")
+    for error in (_author_config_error(spec), _panel_preflight_error(spec)):
+        assert "experimental_bearer_token" in error and "tok-AUTHOR" not in error
+    assert _codex_config_argv(spec) == []  # never forwarded in a job's argv
+    monkeypatch.setenv("OUTERLOOP_CODEX_CONFIG", config)
+    extra, error = climb_mod._resolve_codex_config(None)
+    assert extra == () and "tok-AUTHOR" not in error
+    args = _panel_args(judge_env, "review:codex:judge-model", codex_config_error=error)
+    with pytest.raises(ValueError, match="experimental_bearer_token") as caught:
+        climb_mod._panel_lenses_from_args(args)
+    assert "tok-AUTHOR" not in str(caught.value)
+
+
+def test_a_credentialed_endpoint_never_reaches_the_alarm_argv_or_logs(
+    judge_env, monkeypatch
+) -> None:
+    """The review's case: a judge endpoint behind basic auth. The tick's
+    preflight error feeds the launch-lanes alarm issue, every wake's
+    --panel-skip argv, the PR's edit note and the author's inbox; the author's
+    own endpoint error feeds the tick and job logs. None repeats the secret."""
+    from outerloop.runstate import RunRecord
+    from outerloop.tick import JobWakeDispatcher, _panel_preflight_error
+
+    monkeypatch.setenv("REVIEW_HERMES_PROVIDER", "custom")
+    monkeypatch.setenv("REVIEW_HERMES_BASE_URL", "https://judge:S3CRET@vllm.example/v1")
+    spec = _spec(judge_env, panel="review:hermes:judge-model")
+    error = _panel_preflight_error(spec)
+    assert "user or password" in error and "S3CRET" not in error
+    submitted: list[str] = []
+    monkeypatch.setattr(
+        "outerloop.tick._flight_command", lambda home, name, now, argv: " ".join(argv)
+    )
+    monkeypatch.setattr(
+        "outerloop.tick.submit", lambda root, target, compute, job: submitted.append(job.command)
+    )
+    record = RunRecord(run_id="r-1", target="org/pilot", task_title="t", state="parked")
+    JobWakeDispatcher(object(), spec, now=1.0).dispatch(record, "eval done")  # type: ignore[arg-type]
+    assert "--panel-skip" in submitted[0] and "S3CRET" not in submitted[0]
+    with pytest.raises(ValueError) as caught:
+        climb_mod._panel_lenses_from_args(_panel_args(judge_env, "review:hermes:judge-model"))
+    assert "S3CRET" not in str(caught.value)
+    # the author's endpoint: a key in the query string is refused, unrepeated
+    monkeypatch.setenv("OUTERLOOP_HERMES_PROVIDER", "custom")
+    monkeypatch.setenv("OUTERLOOP_HERMES_BASE_URL", "https://vllm.example/v1?api_key=S3CRET")
+    error = climb_mod.author_config_error("hermes", "open-model", "/img.sif")
+    assert "query string" in error and "S3CRET" not in error

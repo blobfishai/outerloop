@@ -25,12 +25,14 @@ log = logging.getLogger(__name__)
 # the measured results and a note saying where the text is. Meant for a
 # private target, or sessions that read material that must not leave the
 # deployment. The author's replies to review comments are messages it
-# addresses to the reviewers, and are still posted.
+# addresses to the reviewers, and are still posted. Read from the environment
+# and, at every post, from the operator's .env (transcripts_posted).
 TRANSCRIPTS_ENV = "OUTERLOOP_POST_TRANSCRIPTS"
 _TRANSCRIPTS_ON = frozenset({"1", "on", "true", "yes"})
 # empty is an explicit off-switch, as `OUTERLOOP_PANEL=""` is for the panel
 _TRANSCRIPTS_OFF = frozenset({"", "0", "off", "false", "no"})
 _WARNED_VALUES: set[str] = set()
+_WARNED_FILES: set[str] = set()
 TRANSCRIPT_WITHHELD = (
     f"*Session text is not posted for this deployment (`{TRANSCRIPTS_ENV}=off`); it "
     "stays in the run's records on the orchestrator host.*"
@@ -42,16 +44,26 @@ _SESSION_SECTIONS = ("## Agent's report", "## Stewardship report", "## Steward's
 
 
 def transcripts_posted(environ: Mapping[str, str] | None = None) -> bool:
-    """Whether session text may be posted to GitHub (see TRANSCRIPTS_ENV):
-    when the setting is absent, or set to 1, on, true or yes. Present, it is a
-    privacy switch that fails closed: empty (the deploy step's off-switch
-    convention) or 0, off, false, no keeps the text off GitHub, and so does
-    any other value, such as one with a trailing comment, which is logged
-    once."""
+    """Whether session text may be posted to GitHub (see TRANSCRIPTS_ENV).
+    Two places set it, and either one switching it off keeps the text off: the
+    process environment, and the operator's `.env` (~/.config/outerloop/.env),
+    read again at every call. A job keeps the environment it was submitted
+    with, and a parked run arms its next wake from its own job, so reading the
+    file at post time is what makes an off-switch reach every run already in
+    flight. Absent from both, the text is posted. Present, the switch fails
+    closed: only 1, on, true or yes post it; empty (the deploy step's
+    off-switch convention), 0, off, false, no or any other value (such as one
+    with a trailing comment, logged once) keep the text off GitHub, and so
+    does a `.env` that exists but cannot be read under the deploy step's rule."""
     env = os.environ if environ is None else environ
-    if TRANSCRIPTS_ENV not in env:
+    return _switch_on(env.get(TRANSCRIPTS_ENV)) and _switch_on(_operator_file_setting())
+
+
+def _switch_on(setting: str | None) -> bool:
+    """One source's reading of the switch: None (absent) and the on-values post."""
+    if setting is None:
         return True
-    value = env[TRANSCRIPTS_ENV].strip().casefold()
+    value = setting.strip().casefold()
     if value in _TRANSCRIPTS_ON:
         return True
     if value not in _TRANSCRIPTS_OFF and value not in _WARNED_VALUES:
@@ -60,6 +72,23 @@ def transcripts_posted(environ: Mapping[str, str] | None = None) -> bool:
             "%s=%r is neither on nor off; session text stays off GitHub", TRANSCRIPTS_ENV, value
         )
     return False
+
+
+def _operator_file_setting() -> str | None:
+    """TRANSCRIPTS_ENV as the operator's `.env` sets it now; None when the
+    file is absent or does not set it, "" (off) when it exists but cannot be
+    trusted or read (it must be the operator's and not group/world-writable,
+    as the deploy step requires)."""
+    from outerloop import paths
+    from outerloop.cli import StartError, env_file_values
+
+    try:
+        return env_file_values(paths.ENV_FILE, (TRANSCRIPTS_ENV,)).get(TRANSCRIPTS_ENV)
+    except StartError as exc:
+        if str(paths.ENV_FILE) not in _WARNED_FILES:
+            _WARNED_FILES.add(str(paths.ENV_FILE))
+            log.warning("%s; session text stays off GitHub", exc)
+        return ""
 
 
 def panel_summary(rounds: int, blocking_open: bool, degraded: bool) -> str:

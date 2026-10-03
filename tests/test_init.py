@@ -1094,3 +1094,44 @@ def test_render_env_keeps_comments_and_order_of_a_hand_edited_file() -> None:
     )  # App auth replaces the PAT
     assert "OUTERLOOP_GITHUB_APP_FILE=/app.json" in lines  # appended
     assert text.endswith("\n") and "\n\n\n" not in text
+
+
+def test_a_full_rewrite_keeps_the_settings_it_does_not_ask_about(tmp_path, monkeypatch) -> None:
+    """`outerloop init --force` decides placement, target, auth, models and the
+    image. Everything else in the existing .env survives it: dropping the
+    transcript switch would post session text again, and dropping a key-file
+    setting would move a role onto another key."""
+    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(init, "validate_pat", lambda pf, t: "")
+    monkeypatch.setattr(init, "ensure_image", lambda **kw: "")
+    kept = {
+        "OUTERLOOP_POST_TRANSCRIPTS": "off",
+        "OUTERLOOP_PANEL_HERMES_KEY_FILE": "/keys/hermes_judge",
+        "OUTERLOOP_PANEL_CODEX_KEY_FILE": "/keys/codex_judge",
+        "OUTERLOOP_HERMES_KEY_FILE": "/keys/hermes_author",
+        "OUTERLOOP_CLAUDE_KEY_FILE": "/keys/claude_author",
+        "OUTERLOOP_VERTEX_PROJECT": "my-project",
+        "OUTERLOOP_PANEL": "verify:hermes:judge-model",
+        "CUSTOM_SETTING": "keep me",
+    }
+    for key in kept:
+        monkeypatch.delenv(key, raising=False)
+    path = tmp_path / ".env"
+    path.write_text(
+        "OUTERLOOP_COMPUTE=slurm\nOUTERLOOP_ACCOUNT=acct\nOUTERLOOP_TARGET=old/repo\n"
+        + "".join(f"{key}={value}\n" for key, value in kept.items())
+    )
+    path.chmod(0o600)
+    args = ["--yes", "--force", "--compute", "local", "--target", "o/r", "--pat-file", "/p"]
+    assert init.main([*args, "--no-install-harness"]) == 0
+    result = dict(line.split("=", 1) for line in path.read_text().splitlines() if "=" in line)
+    for key, value in kept.items():
+        assert result.get(key) == value, key
+    # what init decides is still decided by this run
+    assert result["OUTERLOOP_TARGET"] == "o/r" and result["OUTERLOOP_COMPUTE"] == "local"
+    assert "OUTERLOOP_ACCOUNT" not in result
+    # an author key the run is given replaces the recorded one
+    key = tmp_path / "claude_key"
+    key.write_text("sk-x")
+    assert init.main([*args, "--no-install-harness", "--author-key-file", str(key)]) == 0
+    assert f"OUTERLOOP_CLAUDE_KEY_FILE={key}" in path.read_text()

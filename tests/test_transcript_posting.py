@@ -277,3 +277,61 @@ def test_the_board_drops_a_withdrawal_reason_recorded_before_the_switch(
     monkeypatch.delenv("OUTERLOOP_POST_TRANSCRIPTS")
     (row,) = collect_rows(tmp_path, "o/r")["tsp"]
     assert "REASON_PROSE" in row.note
+
+
+# ------------------------------------------- the switch reaches runs in flight
+
+
+@pytest.fixture
+def operator_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Writes the operator's ~/.config/outerloop/.env (paths.ENV_FILE)."""
+    from outerloop import paths
+
+    path = tmp_path / "config" / ".env"
+    path.parent.mkdir()
+    monkeypatch.setattr(paths, "ENV_FILE", path)
+
+    def write(text: str, mode: int = 0o600) -> Path:
+        path.write_text(text)
+        path.chmod(mode)
+        return path
+
+    return write
+
+
+def test_an_off_switch_set_while_a_run_is_parked_reaches_its_wakes(
+    operator_env, monkeypatch
+) -> None:
+    """A parked run arms its next wake from its own job, so every wake job
+    inherits the environment the run started with: here, no switch. The
+    operator then sets it off in the .env; the wake reads that at post time
+    and withholds the text."""
+    config = RunConfig(target="o/r", benchmark="tsp")
+    monkeypatch.delenv("OUTERLOOP_POST_TRANSCRIPTS", raising=False)
+    assert "SUBMIT_PROSE" in pr_body(_improved(), config, ())
+    operator_env("OUTERLOOP_TARGET=o/r\nOUTERLOOP_POST_TRANSCRIPTS=off\n")
+    assert transcripts_posted() is False
+    assert "SUBMIT_PROSE" not in pr_body(_improved(), config, ())
+
+
+@pytest.mark.parametrize(
+    ("environment", "file", "posted"),
+    [(None, None, True), ("on", None, True), (None, "on", True), ("on", "on", True),
+     (None, "off", False), ("on", "off", False), ("off", "on", False), ("off", None, False),
+     # an empty value in the file is the deploy step's off-switch
+     ("on", "", False)],
+)  # fmt: skip
+def test_either_place_switching_it_off_keeps_the_text_off(
+    operator_env, environment: str | None, file: str | None, posted: bool
+) -> None:
+    env = {} if environment is None else {"OUTERLOOP_POST_TRANSCRIPTS": environment}
+    lines = "OUTERLOOP_TARGET=o/r\n"
+    if file is not None:
+        lines += f"OUTERLOOP_POST_TRANSCRIPTS={file}\n"
+    operator_env(lines)
+    assert transcripts_posted(env) is posted
+
+
+def test_a_file_the_deploy_step_would_refuse_keeps_the_text_off(operator_env) -> None:
+    operator_env("OUTERLOOP_TARGET=o/r\n", mode=0o666)  # group/world-writable
+    assert transcripts_posted({}) is False

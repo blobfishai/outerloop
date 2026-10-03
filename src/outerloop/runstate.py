@@ -58,7 +58,20 @@ LEASE_NAME = "lease.json"
 # the orchestrator for most of an hour (review finding).
 OUTAGE_COOLDOWN_S = 45 * 60
 THROTTLE_COOLDOWN_S = 5 * 60
-_THROTTLE_HINTS = ("rate_limit", "overloaded")
+# Anthropic's shapes, then the OpenAI-compatible ones hermes and codex report
+# (harness.OUTAGE_PATTERNS): "Rate limited after 3 retries", "429 Too Many
+# Requests", Vertex's RESOURCE_EXHAUSTED.
+_THROTTLE_HINTS = (
+    "rate_limit",
+    "overloaded",
+    "rate limit",
+    "too many requests",
+    "resource_exhausted",
+    "resource exhausted",
+    "resource has been exhausted",
+    "http 429",
+    "error code: 429",
+)
 # Stamps are written on compute nodes and read on other hosts: a stamp a
 # few seconds "in the future" is NTP skew and must count as active, while
 # a far-future timestamp is corruption and must not pause forever.
@@ -145,6 +158,14 @@ class RunRecord:
     # in-flight run is immune to a later env change. "" = resolve per backend
     # (legacy records, and the common config-driven case).
     author_key_file: str = ""
+    # Where the author's model was served when the run started: a hermes
+    # author's provider and base URL, a codex author's routing overrides
+    # (attempt.author_endpoint_record). A wake reproduces it with the key file
+    # above, so a fleet that moves its endpoint never sends this run's key or
+    # conversation to another host. {} = nothing recorded (claude, or a run
+    # older than the field): a wake uses the deployment's endpoint. Credential
+    # free: base URLs and codex config never carry one (role_runner).
+    author_endpoint: dict[str, str] = field(default_factory=dict)
     inbox_seq: int = 0  # last message delivered by a completed session leg
     # The exact PR head the auto-arm may merge: set at publish to the pushed
     # head when the PR was published UNDER merge:auto with a CLEAN panel

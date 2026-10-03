@@ -17,6 +17,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import stat
@@ -292,11 +293,13 @@ def _error_result(stop_reason: str, transcript_path: str = "", detail: str = "")
 
 
 # Substrings that mean "the API itself is unavailable to us" — credit,
-# limit, auth, throttling. Matched only against error surfaces of an
-# is_error result (backend error text, never agent prose). The first group is
-# Anthropic-shaped; the second matches the OpenAI-compatible / hermes+OpenRouter
-# 401 shapes, whose text differs (e.g. "HTTP 401: Missing Authentication
-# header", "No auth credentials found") so the Anthropic patterns miss them.
+# limit, auth, throttling, an endpoint that is down or unreachable. Matched
+# only against error surfaces of an is_error result (backend error text, never
+# agent prose). The first group is Anthropic-shaped; the second matches the
+# OpenAI-compatible shapes hermes and codex report (OpenRouter, a managed
+# model API, a self-hosted inference server), whose text differs: "No auth
+# credentials found", "Rate limited after 3 retries", "RESOURCE_EXHAUSTED",
+# "Connection error.".
 OUTAGE_PATTERNS = (
     "credit balance",
     "usage limit",
@@ -304,12 +307,36 @@ OUTAGE_PATTERNS = (
     "billing",
     "authentication_error",
     "invalid x-api-key",
-    "rate_limit_error",
-    "overloaded_error",
-    "401",
+    "rate_limit",
+    "overloaded",
     "missing authentication",
     "no auth credentials",
     "invalid api key",
+    "rate limit",
+    "too many requests",
+    "resource_exhausted",
+    "resource exhausted",
+    "resource has been exhausted",
+    "insufficient_quota",
+    "service unavailable",
+    "bad gateway",
+    "connection error",
+    "connection refused",
+    "connection reset",
+    "apiconnectionerror",
+    "can't reach the model provider",
+)
+# HTTP statuses that mean the API refused or could not serve us: auth (401),
+# payment (402), throttling (429, 529), an endpoint that is down (502, 503,
+# 504). Matched only where the text names a status ("HTTP 503", "[HTTP 429]",
+# "Error code: 429", "status: 401", "API Error: 401", '"code": 429', "429 Too
+# Many Requests"), never as a bare number: a token count ("~12,401 tokens")
+# or a random file name can hold "401".
+_OUTAGE_STATUS = re.compile(
+    r"(?:\bhttp(?:/[\d.]+)?\s*|\berror code:?\s*|\bstatus(?: code)?\s*[:=]?\s*"
+    r"|\bapi error:?\s*\(?|[\"']code[\"']\s*:\s*[\"']?)(?:401|402|429|502|503|504|529)\b"
+    r"|\b(?:401 unauthorized|402 payment required|429 too many requests"
+    r"|502 bad gateway|503 service unavailable|504 gateway time-?out)\b"
 )
 
 
@@ -348,7 +375,9 @@ def outage(result: SessionResult) -> bool:
         if not text.startswith("api error"):
             return False
         surface = text
-    return any(pattern in surface for pattern in OUTAGE_PATTERNS)
+    return any(pattern in surface for pattern in OUTAGE_PATTERNS) or bool(
+        _OUTAGE_STATUS.search(surface)
+    )
 
 
 def budget_exhausted(result: SessionResult) -> bool:
@@ -1339,6 +1368,50 @@ def _hermes_command(
     return [*argv, *extra_args]
 
 
+# What hermes-agent (the pinned release; run_agent.py and
+# agent/conversation_loop.py) prints when its model API fails: each failed
+# attempt ("API call failed (attempt 1/3): RateLimitError [HTTP 429]"), the
+# terminal status ("❌ Rate limited after 3 retries — HTTP 429: ...",
+# "❌ API failed after ...", "❌ Non-retryable error (HTTP 401): ..."), the final
+# error, and the final response it returns in place of a reply ("API call
+# failed after 3 retries: ..."). A failed session's error_detail is built from
+# these lines: the rest of its stdout holds request sizes in tokens, the
+# endpoint URL and a randomly named sample file, none of which is a cause.
+_HERMES_FAILURE_MARKERS = (
+    "API call failed",
+    "API failed after",
+    "Rate limited after",
+    "Final error:",
+    "Non-retryable",
+    "Billing or credits exhausted",
+    "Failed to initialize agent",
+    "Max retries",
+    "Invalid API response",
+    "can't reach the model provider",
+)
+# hermes's closing lines, which follow every run and never name a cause
+_HERMES_BANNER = (
+    "Sample trajectory saved to",
+    "Failed to save sample",
+    "Agent execution completed",
+)
+
+
+def _hermes_error_detail(stdout: str) -> str:
+    """A failed hermes session's cause: its API-failure lines when hermes
+    printed any, else the tail of its output without the closing banner."""
+    lines = [line.strip() for line in stdout.splitlines()]
+    failures = [
+        line
+        for line in lines
+        if line.startswith("❌") or any(marker in line for marker in _HERMES_FAILURE_MARKERS)
+    ]
+    if failures:
+        return "\n".join(dict.fromkeys(failures))[-500:]
+    kept = [line for line in lines if line and not any(b in line for b in _HERMES_BANNER)]
+    return "\n".join(kept)[-500:]
+
+
 def _parse_hermes_result(
     stdout: str, sample: Any, returncode: int, transcript_path: str = ""
 ) -> SessionResult:
@@ -1382,7 +1455,7 @@ def _parse_hermes_result(
     return SessionResult(
         stop_reason="error" if is_error else "completed",
         is_error=is_error,
-        error_detail=stdout.strip()[-500:] if is_error else "",
+        error_detail=_hermes_error_detail(stdout) if is_error else "",
         cost_usd=0.0,
         num_turns=num_turns,
         session_id="",  # HermesHarness.run injects the resume id (saved-transcript seam)

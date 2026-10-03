@@ -253,6 +253,58 @@ def test_outage_classification_matches_api_refusals_only() -> None:
     assert not outage(result(True, text="Report: raise the usage limit, cut billing costs."))
 
 
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "exceeded retry limit, last status: 429 Too Many Requests",  # codex
+        "unexpected status 503 Service Unavailable: upstream connect error",
+        "Error code: 429 - {'error': {'message': 'Rate limit reached'}}",  # openai SDK
+        "429 RESOURCE_EXHAUSTED: Quota exceeded for aiplatform.googleapis.com",  # Vertex
+        'API Error: 401 {"type":"error"}',
+        "HTTP 502: Bad Gateway",
+        "Connection error.",
+        "connection refused (os error 111)",
+    ],
+)
+def test_openai_compatible_endpoint_failures_are_outages(detail: str) -> None:
+    """A managed model API or a self-hosted server reports throttling, an
+    endpoint that is down and a refused connection in its own words."""
+    failed = SessionResult(
+        stop_reason="error",
+        is_error=True,
+        cost_usd=0.0,
+        num_turns=0,
+        session_id="",
+        final_text="",
+        transcript_path="",
+        error_detail=detail,
+    )
+    assert outage(failed)
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "error_max_turns: stopped after reading 2,401 lines",
+        "HTTP 400: maximum context length is 32,401 tokens",
+        "could not open sample_a401b2c3.json",
+        "TypeError: unsupported operand at line 4010",
+    ],
+)
+def test_a_number_that_contains_401_is_not_an_outage(detail: str) -> None:
+    failed = SessionResult(
+        stop_reason="error",
+        is_error=True,
+        cost_usd=0.0,
+        num_turns=0,
+        session_id="",
+        final_text="",
+        transcript_path="",
+        error_detail=detail,
+    )
+    assert not outage(failed)
+
+
 def test_error_detail_carries_the_real_cause_when_subtype_is_success(tmp_path: Path) -> None:
     """The CLI can flag is_error while stamping a content-free subtype
     ("success"), leaving the real cause only in `result`. The parse must lift

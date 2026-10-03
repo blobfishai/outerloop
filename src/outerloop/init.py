@@ -133,6 +133,38 @@ def render_env(
     return "\n".join(out).rstrip("\n") + "\n"
 
 
+# The keys a full `init` decides from its answers: written when answered,
+# dropped from an existing `.env` when not. Every other key of that file is
+# kept (decided_keys).
+DECIDED_KEYS = (
+    "OUTERLOOP_COMPUTE",
+    "OUTERLOOP_ROOT",
+    "OUTERLOOP_ACCOUNT",
+    "OUTERLOOP_PARTITION",
+    "OUTERLOOP_AUTO_UPDATE",
+    "OUTERLOOP_IMAGE",
+    "OUTERLOOP_TARGET",
+    "OUTERLOOP_GITHUB_APP_FILE",
+    "OUTERLOOP_PAT_FILE",
+    "OUTERLOOP_BOT_LOGIN",
+    "OUTERLOOP_CLAUDE_MODEL",
+    "OUTERLOOP_AUTHOR_BACKEND",
+    "OUTERLOOP_AUTHOR_MODEL",
+)
+
+
+def decided_keys(a: InitAnswers) -> set[str]:
+    """What a full `init` writes or drops itself: DECIDED_KEYS, and the
+    author's key file and harness path when this run found or was given them
+    (an existing record of either is kept when it was not)."""
+    decided = set(DECIDED_KEYS)
+    if a.author_key_file:
+        decided.add(author_key_env(a.author_backend))
+    if a.author_bin:
+        decided.add(author_bin_env(a.author_backend))
+    return decided
+
+
 def _existing_env() -> str:
     """The current `.env` text, or "" when there is none (a fresh setup)."""
     try:
@@ -950,6 +982,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.github_app:
         settings = env_file_values(env_path, keys=None)
+        # the judges' and endpoints' settings: the shell, then the existing file
         judge_keys = (
             "OUTERLOOP_PANEL",
             "REVIEW_BACKEND",
@@ -965,8 +998,15 @@ def main(argv: list[str] | None = None) -> int:
         for key in judge_keys:
             if key in os.environ:
                 settings[key] = os.environ[key]
-            if key in settings:
-                answers.preserved_env[key] = settings[key]
+        # A full rewrite decides only what it asks about: every other setting
+        # of the existing file (OUTERLOOP_POST_TRANSCRIPTS, judge and author
+        # key files, Vertex billing, ...) survives it, as on the focused
+        # --github-app run. Dropping one would silently undo it, and an absent
+        # transcript switch posts session text again.
+        decided = decided_keys(answers)
+        answers.preserved_env.update(
+            {key: value for key, value in settings.items() if key not in decided}
+        )
         from outerloop.panel import parse_lenses
 
         try:
@@ -1084,7 +1124,9 @@ def _claude_model_hint(answers: InitAnswers) -> None:
 
 
 def _author_key_hint(answers: InitAnswers) -> None:
-    if not answers.author_key_file:
+    if not answers.author_key_file and not answers.preserved_env.get(
+        author_key_env(answers.author_backend)
+    ):
         print(
             "  no author key set — put it in "
             f"{author_key_path(answers.author_backend, config_dir=CONFIG_DIR)} "

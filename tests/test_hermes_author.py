@@ -148,6 +148,7 @@ def test_a_fresh_climb_authors_on_hermes(hermes_env, monkeypatch, tmp_path) -> N
     assert (seen["author_backend"], seen["author_model"]) == ("hermes", "open-model")
     assert seen["author_key_file"] == str(hermes_env["key"])
     assert "sk-hermes-author" in seen["secrets"]
+    assert seen["author_endpoint"] == {"hermes_provider": "custom", "hermes_base_url": ENDPOINT}
 
 
 def test_a_misconfigured_hermes_climb_never_starts(hermes_env, monkeypatch, tmp_path, capsys):
@@ -202,6 +203,95 @@ def test_a_wake_rebuilds_the_hermes_author(hermes_env, monkeypatch, tmp_path) ->
     assert harness.api_key == "sk-hermes-author"
 
 
+def _wake_harness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, paths: dict[str, Path], **fields: Any
+) -> Any:
+    """Park a hermes run with `fields` on its record, wake it, and return the
+    author harness the wake built."""
+    from outerloop.runstate import RunRecord, acquire_lease, save_record
+
+    run_id = "b-hermes-endpoint"
+    save_record(
+        tmp_path,
+        RunRecord(
+            run_id=run_id,
+            target="o/r",
+            task_title="t",
+            benchmark="b",
+            state="parked",
+            deadline=NOW + 3600,
+            stage={"phase": "author-sleep", "candidate_sha": "abc"},
+            author_backend="hermes",
+            author_model="open-model",
+            author_key_file=str(paths["key"]),
+            **fields,
+        ),
+        NOW,
+    )
+    assert acquire_lease(tmp_path, run_id, "wake-job:1", "1", NOW)
+    monkeypatch.setenv("SLURM_JOB_ID", "1")
+    monkeypatch.delenv("OUTERLOOP_DISPATCH_WAKE", raising=False)
+    seen: dict[str, Any] = {}
+
+    def fake_resume(*args: Any, **kwargs: Any) -> climb_mod.AttemptOutcome:
+        seen.update(kwargs)
+        return climb_mod.AttemptOutcome(run_id=run_id, outcome="parked")
+
+    monkeypatch.setattr(climb_mod, "resume_run", fake_resume)
+    argv = ["climb", "--resume", run_id, "--run-root", str(tmp_path)]
+    argv += ["--image", str(paths["image"]), "--pat-file", str(paths["pat"])]
+    monkeypatch.setattr("sys.argv", [*argv, "--panel", ""])
+    assert climb_mod.main() == 0
+    return seen["harness"]
+
+
+def test_a_wake_keeps_the_endpoint_its_run_started_on(hermes_env, monkeypatch, tmp_path) -> None:
+    """The fleet moved to OpenRouter, with a new key file, while this run was
+    parked on its own endpoint. The wake rebuilds the author on the recorded
+    endpoint with the run's own key: that key, and the transcript the resume
+    rehydrates, never reach openrouter.ai (nor an OpenRouter key the custom
+    host)."""
+    monkeypatch.setenv("OUTERLOOP_HERMES_PROVIDER", "openrouter")
+    monkeypatch.delenv("OUTERLOOP_HERMES_BASE_URL")
+    monkeypatch.setenv("OUTERLOOP_HERMES_KEY_FILE", str(_key(tmp_path / "or_key", "sk-or-new")))
+    recorded = {"hermes_provider": "custom", "hermes_base_url": ENDPOINT}
+    harness = _wake_harness(tmp_path, monkeypatch, hermes_env, author_endpoint=recorded)
+    assert isinstance(harness, HermesHarness)
+    assert (harness.provider, harness.base_url) == ("custom:outerloop", ENDPOINT)
+    assert harness.key_env == HERMES_ENDPOINT_KEY_ENV
+    assert harness.api_key == "sk-hermes-author"
+
+
+def test_a_run_that_recorded_no_endpoint_wakes_on_the_deployments(
+    hermes_env, monkeypatch, tmp_path
+) -> None:
+    """A run started before the record follows the deployment, as before."""
+    harness = _wake_harness(tmp_path, monkeypatch, hermes_env)
+    assert (harness.provider, harness.base_url) == ("custom:outerloop", ENDPOINT)
+    monkeypatch.setenv("OUTERLOOP_HERMES_PROVIDER", "openrouter")
+    monkeypatch.delenv("OUTERLOOP_HERMES_BASE_URL")
+    harness = _wake_harness(tmp_path / "later", monkeypatch, hermes_env)
+    assert (harness.provider, harness.base_url) == ("openrouter", "")
+
+
+def test_the_record_keeps_its_endpoint(tmp_path) -> None:
+    """Upgrading: records gain author_endpoint; an older record loads with none."""
+    import json
+
+    from outerloop.runstate import RECORD_NAME, RunRecord, load_record, run_dir, save_record
+
+    recorded = {"hermes_provider": "custom", "hermes_base_url": ENDPOINT}
+    record = RunRecord(run_id="r", target="o/r", task_title="t", state="parked",
+                       deadline=NOW + 1, author_endpoint=recorded)  # fmt: skip
+    save_record(tmp_path, record, NOW)
+    assert load_record(tmp_path, "r").author_endpoint == recorded
+    path = run_dir(tmp_path, "r") / RECORD_NAME
+    legacy = json.loads(path.read_text())
+    del legacy["author_endpoint"]
+    path.write_text(json.dumps(legacy))
+    assert load_record(tmp_path, "r").author_endpoint == {}
+
+
 # ------------------------------------------------------------- the panel
 
 
@@ -239,6 +329,71 @@ def test_the_default_panel_of_a_hermes_author_is_hermes(hermes_env, monkeypatch,
             author_model="open-model",
             author_key_file=str(hermes_env["key"]),
         )
+
+
+def test_hermes_judges_never_fall_back_to_openrouter_for_an_author_elsewhere(
+    hermes_env, monkeypatch, tmp_path
+) -> None:
+    """docs/install.md's deployment: a hermes author on its own endpoint,
+    OUTERLOOP_PANEL unset (verify,review) and no judge endpoint named. Its
+    judges would run the author's model on OpenRouter, the default, with the
+    judge key meant for the deployment's endpoint, sending every claim there.
+    The climb and the tick refuse and name the fix."""
+    import argparse
+
+    from outerloop.tick import ServiceSpec, _panel_preflight_error
+
+    judge = _key(tmp_path / "hermes_judge", "sk-hermes-judge")
+    monkeypatch.setenv("OUTERLOOP_PANEL_HERMES_KEY_FILE", str(judge))
+    monkeypatch.delenv("REVIEW_HERMES_PROVIDER", raising=False)
+    monkeypatch.delenv("REVIEW_HERMES_BASE_URL", raising=False)
+    args = argparse.Namespace(
+        panel="verify,review",
+        panel_key_file=str(tmp_path / "no-claude-key"),
+        claude_bin="claude",
+        codex_bin="codex",
+        image=str(hermes_env["image"]),
+    )
+
+    def judges(endpoint: dict[str, str] | None = None) -> tuple[Any, tuple[str, ...]]:
+        lenses, secrets = climb_mod._panel_lenses_from_args(
+            args,
+            author_backend="hermes",
+            author_model="open-model",
+            author_key_file=str(hermes_env["key"]),
+            author_endpoint=endpoint,
+        )
+        harnesses = [lens.harness for lens in lenses if isinstance(lens.harness, HermesHarness)]
+        assert len(harnesses) == len(lenses) == 2
+        return {(h.provider, h.base_url, h.model) for h in harnesses}, secrets
+
+    spec = ServiceSpec(
+        target="org/pilot",
+        account="a",
+        partition="p",
+        run_root=tmp_path,
+        image=str(hermes_env["image"]),
+        home=tmp_path,
+        panel="verify,review",
+    )
+    with pytest.raises(ValueError, match="REVIEW_HERMES_PROVIDER"):
+        judges()
+    assert "REVIEW_HERMES_PROVIDER" in _panel_preflight_error(spec)
+    # a wake judges the run's recorded endpoint, wherever the fleet moved
+    monkeypatch.setenv("OUTERLOOP_HERMES_PROVIDER", "openrouter")
+    monkeypatch.delenv("OUTERLOOP_HERMES_BASE_URL")
+    with pytest.raises(ValueError, match="REVIEW_HERMES_PROVIDER"):
+        judges({"hermes_provider": "custom", "hermes_base_url": ENDPOINT})
+    # an author on OpenRouter keeps OpenRouter judges by default
+    assert judges()[0] == {("openrouter", "", "open-model")}
+    assert _panel_preflight_error(spec) == ""
+    # named, the judges run where the operator said, on their own key
+    monkeypatch.setenv("OUTERLOOP_HERMES_PROVIDER", "custom")
+    monkeypatch.setenv("OUTERLOOP_HERMES_BASE_URL", ENDPOINT)
+    monkeypatch.setenv("REVIEW_HERMES_PROVIDER", "custom")
+    monkeypatch.setenv("REVIEW_HERMES_BASE_URL", ENDPOINT)
+    assert judges() == ({("custom:outerloop", ENDPOINT, "open-model")}, ("sk-hermes-judge",))
+    assert _panel_preflight_error(spec) == ""
 
 
 # -------------------------------------------------------------- the tick
