@@ -67,6 +67,7 @@ from outerloop.ledger_events import display_leader, measurement_pending, queue_p
 from outerloop.markers import has_label, has_marker, marker
 from outerloop.orchestrator import draw_run_seed, steward_out_of_scope
 from outerloop.paths import CONFIG_DIR
+from outerloop.posting import TRANSCRIPT_WITHHELD, transcripts_posted
 from outerloop.progress import fmt_metric
 from outerloop.role_runner import build_harness, role_key, run_role
 from outerloop.roles import steward_spec
@@ -524,7 +525,11 @@ def live_steward(
                         config.target,
                         issue_number,
                         f"Steward run `{run_id}` finished (no-change).\n\n"
-                        f"{redact(session.final_text, secrets)[:8000]}",
+                        + (
+                            redact(session.final_text, secrets)[:8000]
+                            if transcripts_posted()
+                            else TRANSCRIPT_WITHHELD
+                        ),
                     ),
                     secrets,
                 )
@@ -581,7 +586,12 @@ def live_steward(
             f"command passed contained. Sibling rows were smoke-checked, not "
             f"re-measured — if this change altered a shared harness, re-base "
             f"them with their own work orders.\n\n"
-            f"## Stewardship report\n\n{redact(session.final_text, secrets)[:20000]}"
+            "## Stewardship report\n\n"
+            + (
+                redact(session.final_text, secrets)[:20000]
+                if transcripts_posted()
+                else TRANSCRIPT_WITHHELD
+            )
         )
         body += f"\n\n{progress_link(config.target)}\n"
         pr_url = github.create_pull(
@@ -741,7 +751,12 @@ def live_steward(
                 config.target,
                 issue_number,
                 f"Steward run `{run_id}` finished ({outcome_name}).\n\n"
-                f"Pull request: {pr_url}\n\n{redact(session.final_text, secrets)[:8000]}",
+                f"Pull request: {pr_url}\n\n"
+                + (
+                    redact(session.final_text, secrets)[:8000]
+                    if transcripts_posted()
+                    else TRANSCRIPT_WITHHELD
+                ),
             ),
             secrets,
         )

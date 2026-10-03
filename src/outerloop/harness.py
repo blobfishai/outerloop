@@ -17,6 +17,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import stat
@@ -223,15 +224,19 @@ def vertex_from_env() -> VertexConfig | None:
 
 
 def redact(text: str, secrets: tuple[str, ...]) -> str:
-    """Strip known secrets from text before it is stored anywhere. Installation
-    tokens minted after a call site snapshotted its tuple are covered too: the
-    App provider rotates ~hourly, so the process-wide issued set is consulted
-    at write time, not capture time."""
+    """Strip known secrets from text before it is stored anywhere. Credentials
+    that appeared after a call site snapshotted its tuple are covered too: the
+    App provider mints a new installation token about hourly, and a key or
+    token file rewritten during a run is re-read, so the process-wide sets of
+    minted and read credentials are consulted at write time, not capture time.
+    Longer secrets are replaced first, so one that contains another is never
+    left half-visible."""
     from outerloop.appauth import issued_tokens
+    from outerloop.github import seen_secrets
 
-    for secret in (*secrets, *issued_tokens()):
-        if secret:
-            text = text.replace(secret, "[redacted]")
+    known = {secret for secret in (*secrets, *issued_tokens(), *seen_secrets()) if secret}
+    for secret in sorted(known, key=len, reverse=True):
+        text = text.replace(secret, "[redacted]")
     return text
 
 
@@ -240,6 +245,11 @@ HARNESS_INSTALL = {
     "codex": "bash scripts/install_codex.sh",
     "hermes": "bash scripts/install_hermes.sh",
 }
+
+# The climbing author's harnesses (the climb's --author-backend choices, and
+# init's). hermes reaches any model its provider serves: OpenRouter, OpenAI, or
+# an OpenAI-compatible endpoint.
+AUTHOR_BACKENDS = ("claude", "codex", "hermes")
 
 
 def default_binary(backend: str, environ: Mapping[str, str] | None = None) -> str:
@@ -283,11 +293,13 @@ def _error_result(stop_reason: str, transcript_path: str = "", detail: str = "")
 
 
 # Substrings that mean "the API itself is unavailable to us" — credit,
-# limit, auth, throttling. Matched only against error surfaces of an
-# is_error result (backend error text, never agent prose). The first group is
-# Anthropic-shaped; the second matches the OpenAI-compatible / hermes+OpenRouter
-# 401 shapes, whose text differs (e.g. "HTTP 401: Missing Authentication
-# header", "No auth credentials found") so the Anthropic patterns miss them.
+# limit, auth, throttling, an endpoint that is down or unreachable. Matched
+# only against error surfaces of an is_error result (backend error text, never
+# agent prose). The first group is Anthropic-shaped; the second matches the
+# OpenAI-compatible shapes hermes and codex report (OpenRouter, a managed
+# model API, a self-hosted inference server), whose text differs: "No auth
+# credentials found", "Rate limited after 3 retries", "RESOURCE_EXHAUSTED",
+# "Connection error.".
 OUTAGE_PATTERNS = (
     "credit balance",
     "usage limit",
@@ -295,12 +307,36 @@ OUTAGE_PATTERNS = (
     "billing",
     "authentication_error",
     "invalid x-api-key",
-    "rate_limit_error",
-    "overloaded_error",
-    "401",
+    "rate_limit",
+    "overloaded",
     "missing authentication",
     "no auth credentials",
     "invalid api key",
+    "rate limit",
+    "too many requests",
+    "resource_exhausted",
+    "resource exhausted",
+    "resource has been exhausted",
+    "insufficient_quota",
+    "service unavailable",
+    "bad gateway",
+    "connection error",
+    "connection refused",
+    "connection reset",
+    "apiconnectionerror",
+    "can't reach the model provider",
+)
+# HTTP statuses that mean the API refused or could not serve us: auth (401),
+# payment (402), throttling (429, 529), an endpoint that is down (502, 503,
+# 504). Matched only where the text names a status ("HTTP 503", "[HTTP 429]",
+# "Error code: 429", "status: 401", "API Error: 401", '"code": 429', "429 Too
+# Many Requests"), never as a bare number: a token count ("~12,401 tokens")
+# or a random file name can hold "401".
+_OUTAGE_STATUS = re.compile(
+    r"(?:\bhttp(?:/[\d.]+)?\s*|\berror code:?\s*|\bstatus(?: code)?\s*[:=]?\s*"
+    r"|\bapi error:?\s*\(?|[\"']code[\"']\s*:\s*[\"']?)(?:401|402|429|502|503|504|529)\b"
+    r"|\b(?:401 unauthorized|402 payment required|429 too many requests"
+    r"|502 bad gateway|503 service unavailable|504 gateway time-?out)\b"
 )
 
 
@@ -339,7 +375,9 @@ def outage(result: SessionResult) -> bool:
         if not text.startswith("api error"):
             return False
         surface = text
-    return any(pattern in surface for pattern in OUTAGE_PATTERNS)
+    return any(pattern in surface for pattern in OUTAGE_PATTERNS) or bool(
+        _OUTAGE_STATUS.search(surface)
+    )
 
 
 def budget_exhausted(result: SessionResult) -> bool:
@@ -1249,6 +1287,46 @@ class CodexHarness:
         return parsed
 
 
+# An OpenAI-compatible endpoint for hermes is a NAMED provider entry the
+# harness seeds in the per-run config (`providers.<name>`, selected as
+# `custom:<name>`): it carries the base URL, and names the variable hermes
+# reads the key from, so the key stays in the session environment and never
+# lands in a file.
+HERMES_ENDPOINT_PROVIDER = "outerloop"
+HERMES_ENDPOINT_KEY_ENV = "OPENAI_COMPATIBLE_API_KEY"
+
+
+def _hermes_config(
+    provider: str,
+    model: str,
+    base_url: str,
+    key_env: str,
+    approvals_deny: tuple[str, ...],
+) -> str:
+    """The minimal headless hermes config.yaml: the provider, the default
+    model, a named endpoint entry for a `custom:<name>` provider, and the
+    shell deny-list. Every value is double-quoted; callers pass values that
+    hold no quotes or newlines (an endpoint URL is validated before here)."""
+    lines = ["model:\n"]
+    if model:
+        lines.append(f'  default: "{model}"\n')
+    lines.append(f'  provider: "{provider}"\n')
+    name = provider.partition(":")[2]
+    if provider.startswith("custom:") and base_url:
+        lines += [
+            "providers:\n",
+            f"  {name}:\n",
+            f'    base_url: "{base_url}"\n',
+            f'    key_env: "{key_env}"\n',
+        ]
+        if model:
+            lines.append(f'    default_model: "{model}"\n')
+    if approvals_deny:
+        lines.append("approvals:\n  deny:\n")
+        lines += [f'    - "{glob}"\n' for glob in approvals_deny]
+    return "".join(lines)
+
+
 def _hermes_command(
     repo_dir: Path,
     query: str,
@@ -1288,6 +1366,50 @@ def _hermes_command(
     if disabled_toolsets:
         argv.append(f'--disabled_toolsets="{",".join(disabled_toolsets)}"')
     return [*argv, *extra_args]
+
+
+# What hermes-agent (the pinned release; run_agent.py and
+# agent/conversation_loop.py) prints when its model API fails: each failed
+# attempt ("API call failed (attempt 1/3): RateLimitError [HTTP 429]"), the
+# terminal status ("❌ Rate limited after 3 retries — HTTP 429: ...",
+# "❌ API failed after ...", "❌ Non-retryable error (HTTP 401): ..."), the final
+# error, and the final response it returns in place of a reply ("API call
+# failed after 3 retries: ..."). A failed session's error_detail is built from
+# these lines: the rest of its stdout holds request sizes in tokens, the
+# endpoint URL and a randomly named sample file, none of which is a cause.
+_HERMES_FAILURE_MARKERS = (
+    "API call failed",
+    "API failed after",
+    "Rate limited after",
+    "Final error:",
+    "Non-retryable",
+    "Billing or credits exhausted",
+    "Failed to initialize agent",
+    "Max retries",
+    "Invalid API response",
+    "can't reach the model provider",
+)
+# hermes's closing lines, which follow every run and never name a cause
+_HERMES_BANNER = (
+    "Sample trajectory saved to",
+    "Failed to save sample",
+    "Agent execution completed",
+)
+
+
+def _hermes_error_detail(stdout: str) -> str:
+    """A failed hermes session's cause: its API-failure lines when hermes
+    printed any, else the tail of its output without the closing banner."""
+    lines = [line.strip() for line in stdout.splitlines()]
+    failures = [
+        line
+        for line in lines
+        if line.startswith("❌") or any(marker in line for marker in _HERMES_FAILURE_MARKERS)
+    ]
+    if failures:
+        return "\n".join(dict.fromkeys(failures))[-500:]
+    kept = [line for line in lines if line and not any(b in line for b in _HERMES_BANNER)]
+    return "\n".join(kept)[-500:]
 
 
 def _parse_hermes_result(
@@ -1333,7 +1455,7 @@ def _parse_hermes_result(
     return SessionResult(
         stop_reason="error" if is_error else "completed",
         is_error=is_error,
-        error_detail=stdout.strip()[-500:] if is_error else "",
+        error_detail=_hermes_error_detail(stdout) if is_error else "",
         cost_usd=0.0,
         num_turns=num_turns,
         session_id="",  # HermesHarness.run injects the resume id (saved-transcript seam)
@@ -1384,7 +1506,9 @@ class HermesHarness:
     # Useful to hardline-forbid specific dangerous commands.
     approvals_deny: tuple[str, ...] = ()
     model: str = ""  # OpenRouter format (provider/model); empty -> hermes default
-    base_url: str = ""  # empty -> the seeded provider's own endpoint
+    # empty -> the seeded provider's own endpoint; with a `custom:<name>`
+    # provider, the OpenAI-compatible endpoint its seeded entry routes to
+    base_url: str = ""
     max_turns: int = DEFAULT_MAX_TURNS
     timeout_s: int = DEFAULT_TIMEOUT_S
     enabled_toolsets: tuple[str, ...] = ("file",)
@@ -1445,18 +1569,26 @@ class HermesHarness:
                 )
             prior_turns = loaded
             brief_to_send = f"{_render_resume_transcript(prior_turns)}\n\n{brief_text}"
+        if self.provider.startswith("custom:") and not self.base_url:
+            # a named endpoint without its URL would let hermes fall back to
+            # another provider with whatever key it finds: refuse instead
+            return _error_result(
+                "config-error", detail=f"hermes provider {self.provider} needs a base URL"
+            )
+        if any(c in value for value in (self.base_url, self.model) for c in '"\n\r'):
+            return _error_result(
+                "config-error", detail="hermes model and base URL cannot hold quotes or newlines"
+            )
         if self.provider:
-            # minimal headless config: provider + default model, nothing else
+            # minimal headless config: provider + default model (+ the named
+            # endpoint of a custom provider), nothing else
             hermes_dir = session_home / ".hermes"
             try:
                 hermes_dir.mkdir(mode=0o700, exist_ok=True)
-                config_lines = ["model:\n", f'  provider: "{self.provider}"\n']
-                if self.model:
-                    config_lines.insert(1, f'  default: "{self.model}"\n')
-                if self.approvals_deny:
-                    config_lines.append("approvals:\n  deny:\n")
-                    config_lines += [f'    - "{glob}"\n' for glob in self.approvals_deny]
-                if not _write_private_fixed(hermes_dir / "config.yaml", "".join(config_lines)):
+                config = _hermes_config(
+                    self.provider, self.model, self.base_url, self.key_env, self.approvals_deny
+                )
+                if not _write_private_fixed(hermes_dir / "config.yaml", config):
                     raise OSError("hermes config write refused (symlink?) or failed")
             except OSError as exc:
                 log.warning("could not seed hermes config: %s", exc)

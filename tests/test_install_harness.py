@@ -21,7 +21,9 @@ def test_installer_mapping():
         assert (ROOT / command.split()[1]).is_file()
 
 
-@pytest.mark.parametrize("backend", init.AUTHOR_BACKENDS)
+# hermes installs a source checkout and runtime, not one binary:
+# tests/test_hermes_author.py covers its init path
+@pytest.mark.parametrize("backend", [b for b in init.AUTHOR_BACKENDS if b != "hermes"])
 @pytest.mark.parametrize(
     "mode", ["missing", "present", "skip", "failure", "no_output", "permission"]
 )

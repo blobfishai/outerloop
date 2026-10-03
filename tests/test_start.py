@@ -84,6 +84,43 @@ def test_env_file_values_refuses_a_writable_file(tmp_path: Path, mode: int) -> N
         env_file_values(path)
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "plain",
+        '"double"',
+        "'single'",
+        'model_provider="local"',  # a TOML string at the end keeps its closing quote
+        '"model_provider="local""',  # a quoted value whose own value is quoted
+        "'a=\"x\";b=2'",
+        "\"mismatched'",
+        '"',
+        "",
+        "x\r",  # a CRLF-edited file
+    ],
+)
+def test_deploy_and_start_read_a_value_alike(tmp_path: Path, value: str) -> None:
+    """The chain's deploy step (bash) and `outerloop start` (python) read one
+    .env; they must unquote a value the same way, or a codex override like
+    `model_provider="local"` reaches a cluster tick without its closing quote."""
+    import subprocess
+
+    sh = (REPO / "scripts" / "tick_deploy.sh").read_text()
+    m = re.search(r"^env_value\(\) \{\n.*?^\}\n", sh, re.S | re.M)
+    assert m is not None
+    snippet = tmp_path / "env_value.sh"
+    snippet.write_text(m.group(0))
+    line = f"OUTERLOOP_CODEX_CONFIG={value}"
+    bash = subprocess.run(
+        ["bash", "-c", f'. "{snippet}"; _line="$1"; env_value; printf %s "$_v"', "_", line],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    python = env_file_values(env_file(tmp_path, line + "\n"), ("OUTERLOOP_CODEX_CONFIG",))
+    assert bash == python["OUTERLOOP_CODEX_CONFIG"]
+
+
 def test_tick_env_keys_match_the_deploy_allowlist() -> None:
     """The local loop exports the same author knobs the chain's deploy step
     does; the two lists must not drift."""
@@ -708,10 +745,27 @@ def test_start_refuses_without_the_claude_model(clean_env, monkeypatch, capsys, 
     assert main(argv) == 0
 
 
-def test_hermes_is_a_review_backend_not_an_author(tmp_path):
+def test_a_hermes_author_needs_its_pinned_runtime(tmp_path):
+    """Hermes has no CLI to find: start checks the source checkout and runtime
+    at REVIEW_HERMES_REPO instead, and names the installer when they are missing."""
+    from outerloop.hermes_install import HERMES_SHA, hermes_runtime
+
     problem = cli.missing_harness_binary({"OUTERLOOP_AUTHOR_BACKEND": "hermes"}, {})
-    assert "unsupported author backend 'hermes'" in problem
+    assert "REVIEW_HERMES_REPO is not set" in problem
     assert "scripts/install_hermes.sh" in problem
+    repo = tmp_path / "hermes-agent"
+    repo.mkdir()
+    (repo / "run_agent.py").touch()
+    values = {"OUTERLOOP_AUTHOR_BACKEND": "hermes", "REVIEW_HERMES_REPO": str(repo)}
+    assert f"at {repo}" in cli.missing_harness_binary(values, {})
+    runtime = hermes_runtime(repo)
+    (runtime / "venv/bin").mkdir(parents=True)
+    (runtime / "venv/bin/python").write_text("#!/bin/sh\n")
+    (runtime / "venv/bin/python").chmod(0o755)
+    (runtime / ".complete").write_text(HERMES_SHA)
+    assert cli.missing_harness_binary(values, {}) == ""
+    unknown = cli.missing_harness_binary({"OUTERLOOP_AUTHOR_BACKEND": "bogus"}, {})
+    assert "unsupported author backend 'bogus'" in unknown
 
 
 # ---------------------------------------------------------------- uv

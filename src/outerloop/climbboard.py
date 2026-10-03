@@ -167,6 +167,16 @@ def _curve_from_eval(run_directory: Path) -> list[list[float]]:
     return best
 
 
+def _public_note(note: str, posted: bool) -> str:
+    """A run's ending note as the board may publish it. A withdrawal note
+    quotes the author's reason, which stays local when the deployment keeps
+    session text off GitHub, including for a run that ended before the
+    switch was set."""
+    if not posted and note.startswith("Author withdrew:"):
+        return "Author withdrew"
+    return note
+
+
 def collect_rows(
     root: Path, target: str, records: list[RunRecord] | None = None
 ) -> dict[str, list[ClimbRow]]:
@@ -176,8 +186,11 @@ def collect_rows(
     absent, the rows are read fresh (direct callers, tests)."""
     from datetime import UTC, datetime
 
+    from outerloop.posting import transcripts_posted
+
     if records is None:
         records = list_runs(root)
+    posted = transcripts_posted()
     out: dict[str, list[ClimbRow]] = {}
     for record in records:
         # only ENDED runs: a parked run's outcome is not known yet (its
@@ -191,6 +204,8 @@ def collect_rows(
         baseline, candidate, hyp = _report_fields(report)
         stage = record.stage or {}
         hyp = hyp or str(stage.get("hypothesis") or "")[:MAX_HYPOTHESIS_CHARS]
+        if not posted:
+            hyp = ""  # the author's words: kept off the published board
         ended = datetime.fromtimestamp(record.updated or record.created, tz=UTC)
         outcome = record.ending or "ended"
         # link the report only when the ledger's own marker says it is on the
@@ -221,7 +236,7 @@ def collect_rows(
                 hypothesis=hyp,
                 pr_url=record.pr_url,
                 report=report,
-                note=summarize(record.ending_note or "", 120),
+                note=summarize(_public_note(record.ending_note or "", posted), 120),
             )
         )
     return out
@@ -1074,9 +1089,13 @@ def collect_status(
     `records` shares the board's one snapshot (the runs list and the queue's
     owner maps read the same records); absent, it reads fresh."""
     from outerloop.dispatch import effective_eval_minutes
+    from outerloop.posting import transcripts_posted
 
     if records is None:
         records = list_runs(root)
+    # the author's words: kept off the published strip when the deployment
+    # keeps session text off GitHub
+    posted = transcripts_posted()
     budgets = {
         b.name: (b.depth_k, b.sleep_k, getattr(b, "eval_minutes", 0) or 0)
         for b in getattr(contract, "benchmarks", ())
@@ -1088,8 +1107,9 @@ def collect_status(
         if record.target != target or record.state not in _LIVE_STATES:
             continue
         stage = record.stage or {}
-        note = str(stage.get("report") or "")
+        note = str(stage.get("report") or "") if posted else ""
         hyp = report_hypothesis(note) or str(stage.get("hypothesis") or "")[:MAX_HYPOTHESIS_CHARS]
+        hyp = hyp if posted else ""
         exp_done, exp_total, exp_minutes = _experiment_progress(root, record)
         depth_k, sleep_k, bench_minutes = budgets.get(record.benchmark, (None, None, 0))
         gpu_ceiling = gpu_budget

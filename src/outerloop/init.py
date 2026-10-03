@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from outerloop.cli import ENV_FILE, StartError, env_file_values
-from outerloop.harness import HARNESS_INSTALL, default_binary
+from outerloop.harness import AUTHOR_BACKENDS, HARNESS_INSTALL, default_binary
 from outerloop.hermes_install import hermes_ready
 from outerloop.image import ensure_image
 from outerloop.paths import write_private
@@ -42,8 +42,6 @@ log = logging.getLogger(__name__)
 CONFIG_DIR = ENV_FILE.parent
 DEFAULT_PAT_FILE = CONFIG_DIR / "bot_pat"
 API = "https://api.github.com"
-# The climbing author's harnesses (attempt.py's --author-backend choices).
-AUTHOR_BACKENDS = ("claude", "codex")
 
 
 @dataclass
@@ -59,7 +57,8 @@ class InitAnswers:
     author_key_file: str = ""  # the author's model key file, when known
     image: str = ""  # the agent image (OUTERLOOP_IMAGE)
     uncontained: bool = False  # --no-image: write OUTERLOOP_IMAGE= so no image is picked up
-    author_bin: str = ""  # the author harness binary (claude/codex), absolute, when found
+    # the author harness binary (claude/codex) or hermes source checkout, absolute, when found
+    author_bin: str = ""
 
     # Existing deployment values untouched by a focused GitHub App update.
     preserved_env: dict[str, str] = field(default_factory=dict)
@@ -134,6 +133,38 @@ def render_env(
     return "\n".join(out).rstrip("\n") + "\n"
 
 
+# The keys a full `init` decides from its answers: written when answered,
+# dropped from an existing `.env` when not. Every other key of that file is
+# kept (decided_keys).
+DECIDED_KEYS = (
+    "OUTERLOOP_COMPUTE",
+    "OUTERLOOP_ROOT",
+    "OUTERLOOP_ACCOUNT",
+    "OUTERLOOP_PARTITION",
+    "OUTERLOOP_AUTO_UPDATE",
+    "OUTERLOOP_IMAGE",
+    "OUTERLOOP_TARGET",
+    "OUTERLOOP_GITHUB_APP_FILE",
+    "OUTERLOOP_PAT_FILE",
+    "OUTERLOOP_BOT_LOGIN",
+    "OUTERLOOP_CLAUDE_MODEL",
+    "OUTERLOOP_AUTHOR_BACKEND",
+    "OUTERLOOP_AUTHOR_MODEL",
+)
+
+
+def decided_keys(a: InitAnswers) -> set[str]:
+    """What a full `init` writes or drops itself: DECIDED_KEYS, and the
+    author's key file and harness path when this run found or was given them
+    (an existing record of either is kept when it was not)."""
+    decided = set(DECIDED_KEYS)
+    if a.author_key_file:
+        decided.add(author_key_env(a.author_backend))
+    if a.author_bin:
+        decided.add(author_bin_env(a.author_backend))
+    return decided
+
+
 def _existing_env() -> str:
     """The current `.env` text, or "" when there is none (a fresh setup)."""
     try:
@@ -144,16 +175,39 @@ def _existing_env() -> str:
 
 def author_bin_env(backend: str) -> str:
     """The `.env` key naming `backend`'s harness binary (`OUTERLOOP_CLAUDE_BIN`,
-    `OUTERLOOP_CODEX_BIN`), the same names `attempt` reads."""
-    return f"OUTERLOOP_{(backend or AUTHOR_BACKENDS[0]).upper()}_BIN"
+    `OUTERLOOP_CODEX_BIN`), the same names `attempt` reads. Hermes has no CLI:
+    its key is the pinned source checkout every hermes role shares
+    (`REVIEW_HERMES_REPO`)."""
+    name = backend or AUTHOR_BACKENDS[0]
+    return "REVIEW_HERMES_REPO" if name == "hermes" else f"OUTERLOOP_{name.upper()}_BIN"
+
+
+def _hermes_checkout() -> Path:
+    """Where the hermes source lives: REVIEW_HERMES_REPO from the shell, else
+    the one the existing `.env` records (the judge setup reads the same pair,
+    and the shell wins there too), else the installer's default
+    `~/hermes-agent`. An unreadable `.env` counts as no record."""
+    raw = os.environ.get("REVIEW_HERMES_REPO", "")
+    if not raw:
+        try:
+            raw = env_file_values(CONFIG_DIR / ENV_FILE.name, ("REVIEW_HERMES_REPO",)).get(
+                "REVIEW_HERMES_REPO", ""
+            )
+        except StartError:
+            raw = ""
+    return Path(raw or Path.home() / "hermes-agent").expanduser().absolute()
 
 
 def locate_harness(backend: str) -> str:
     """The absolute path of `backend`'s CLI: configured environment path, then PATH, then
     ~/.local/bin (where the native installers put it and where a Slurm job,
     with no login PATH, would not find it); "" when absent. Recorded in .env so
-    every job spawns the same binary the operator installed."""
+    every job spawns the same binary the operator installed. For hermes, the
+    source checkout, when its pinned runtime is ready."""
     name = backend or AUTHOR_BACKENDS[0]
+    if name == "hermes":
+        checkout = _hermes_checkout()
+        return str(checkout) if hermes_ready(checkout) else ""
     recorded = os.environ.get(author_bin_env(name), "")
     if recorded:
         # an operator's explicit path is kept when it works and reported when it does not
@@ -177,7 +231,7 @@ def install_harness(backend: str, target: Path | None = None) -> str:
     name = backend or AUTHOR_BACKENDS[0]
     if target is None:
         target = (
-            Path(os.environ.get("REVIEW_HERMES_REPO") or Path.home() / "hermes-agent")
+            _hermes_checkout()
             if name == "hermes"
             else Path(os.environ.get(author_bin_env(name)) or Path.home() / ".local/bin" / name)
         )
@@ -207,6 +261,14 @@ def install_harness(backend: str, target: Path | None = None) -> str:
 def _harness_hint(answers: InitAnswers) -> None:
     if not answers.author_bin:
         name = answers.author_backend or AUTHOR_BACKENDS[0]
+        if name == "hermes":
+            print(
+                "  no hermes-agent source and runtime found at REVIEW_HERMES_REPO or "
+                "~/hermes-agent — start will refuse to run\n"
+                f"  until they are installed. Install them: {HARNESS_INSTALL['hermes']} <dir>\n"
+                "  then run `outerloop init --force` so the path is recorded."
+            )
+            return
         print(
             f"  no `{name}` binary found on PATH or in ~/.local/bin — start will refuse to run\n"
             f"  until it is installed. Install it: {HARNESS_INSTALL.get(name, 'see its docs')}\n"
@@ -525,7 +587,7 @@ def _collect(args: argparse.Namespace, interactive: bool) -> tuple[InitAnswers, 
     # (that one is about auth). When asked, offer the fixed set, not a blank.
     ask_author = interactive and not args.github_app
     backend = args.author_backend or (
-        _ask("Author backend (claude or codex)", "claude") if ask_author else ""
+        _ask("Author backend (claude, codex or hermes)", "claude") if ask_author else ""
     )
     model = args.author_model or (
         _ask("Author model (blank = the backend's default)") if ask_author else ""
@@ -800,7 +862,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--author-backend",
         dest="author_backend",
-        help=f"climbing author's backend ({' or '.join(AUTHOR_BACKENDS)}; default claude)",
+        help=f"climbing author's backend ({', '.join(AUTHOR_BACKENDS)}; default claude)",
     )
     parser.add_argument(
         "--no-install-harness",
@@ -920,18 +982,31 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.github_app:
         settings = env_file_values(env_path, keys=None)
+        # the judges' and endpoints' settings: the shell, then the existing file
         judge_keys = (
             "OUTERLOOP_PANEL",
             "REVIEW_BACKEND",
             "REVIEW_MODEL",
             "REVIEW_HERMES_PROVIDER",
             "REVIEW_HERMES_REPO",
+            "REVIEW_HERMES_BASE_URL",
+            "OUTERLOOP_CODEX_CONFIG",
+            "OUTERLOOP_PANEL_CODEX_CONFIG",
+            "OUTERLOOP_HERMES_PROVIDER",
+            "OUTERLOOP_HERMES_BASE_URL",
         )
         for key in judge_keys:
             if key in os.environ:
                 settings[key] = os.environ[key]
-            if key in settings:
-                answers.preserved_env[key] = settings[key]
+        # A full rewrite decides only what it asks about: every other setting
+        # of the existing file (OUTERLOOP_POST_TRANSCRIPTS, judge and author
+        # key files, Vertex billing, ...) survives it, as on the focused
+        # --github-app run. Dropping one would silently undo it, and an absent
+        # transcript switch posts session text again.
+        decided = decided_keys(answers)
+        answers.preserved_env.update(
+            {key: value for key, value in settings.items() if key not in decided}
+        )
         from outerloop.panel import parse_lenses
 
         try:
@@ -1049,7 +1124,9 @@ def _claude_model_hint(answers: InitAnswers) -> None:
 
 
 def _author_key_hint(answers: InitAnswers) -> None:
-    if not answers.author_key_file:
+    if not answers.author_key_file and not answers.preserved_env.get(
+        author_key_env(answers.author_backend)
+    ):
         print(
             "  no author key set — put it in "
             f"{author_key_path(answers.author_backend, config_dir=CONFIG_DIR)} "

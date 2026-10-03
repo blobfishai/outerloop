@@ -55,6 +55,7 @@ from outerloop.inbox import (
 from outerloop.inbox import pending as pending_messages
 from outerloop.operator_limits import CapacityError
 from outerloop.panel import PanelVerdict
+from outerloop.posting import TRANSCRIPT_WITHHELD, panel_summary, transcripts_posted
 from outerloop.role_runner import run_role
 from outerloop.roles import author_spec
 from outerloop.rolespec import RoleSpec
@@ -521,7 +522,13 @@ class AttemptResult:
     panel_blocking_open: bool = False
     panel_degraded: bool = False
 
-    def report(self, config: RunConfig, redact_secrets: tuple[str, ...] = ()) -> str:
+    def report(
+        self, config: RunConfig, redact_secrets: tuple[str, ...] = (), *, transcripts: bool = True
+    ) -> str:
+        """The run report: the outcome and measurements, then the session's own
+        report. `transcripts=False` (a copy that GitHub will show while the
+        deployment keeps session text off it) puts the withheld note in place
+        of the session's text; the local report keeps it."""
         lines = [
             f"# Run report — {config.target} / {config.benchmark}",
             f"Outcome: **{self.outcome}**",
@@ -551,7 +558,9 @@ class AttemptResult:
                 "## Agent's report",
                 # redact BEFORE truncating: a secret straddling the cut would
                 # otherwise survive as an unmatchable prefix
-                redact(self.session.final_text, redact_secrets)[:MAX_REPORT_BODY],
+                redact(self.session.final_text, redact_secrets)[:MAX_REPORT_BODY]
+                if transcripts
+                else TRANSCRIPT_WITHHELD,
             ]
         return redact("\n".join(lines), redact_secrets)
 
@@ -2185,9 +2194,11 @@ def _ended(row: dict[str, Any]) -> str:
     return how
 
 
-def _experiments_section(rows: list[dict[str, Any]]) -> list[str]:
+def _experiments_section(rows: list[dict[str, Any]], *, why: bool = True) -> list[str]:
     """The run's launches as the ledger recorded them: what ran, how each job
-    ended, what it printed last. Empty when the run launched nothing."""
+    ended, what it printed last. Empty when the run launched nothing. Without
+    `why`, the author's note on each launch is left out (session text the
+    deployment keeps off GitHub)."""
     if not rows:
         return []
     lines = [
@@ -2207,7 +2218,7 @@ def _experiments_section(rows: list[dict[str, Any]]) -> list[str]:
             pace = f" (x{row['array']}, {k} at a time)"
         lines.append(
             f"| {row.get('sleep', '')} | {_cell(row.get('launch', ''), 48)}{pace} | "
-            f"{_cell(row.get('why', ''), 120)} | {_cell(row.get('job', ''), 48)} | "
+            f"{_cell(row.get('why', ''), 120) if why else '-'} | {_cell(row.get('job', ''), 48)} | "
             f"{_ended(row)} | {_cell(row.get('result', ''), 160)} |"
         )
     rest = rows[MAX_EXPERIMENT_ROWS:]
@@ -2225,10 +2236,14 @@ def pr_body(
     redact_secrets: tuple[str, ...],
     display_digits: int | None = None,
     experiments: list[dict[str, Any]] | None = None,
+    *,
+    transcripts: bool | None = None,
 ) -> str:
     """The PR body for an improved run: the author's report, the experiments
     the run actually ran (from the launch ledger), the measured table, and
-    the panel's transcript.
+    the panel's transcript. `transcripts` (default: the deployment's
+    OUTERLOOP_POST_TRANSCRIPTS) False withholds the session text — the report,
+    the judges' transcripts and the launch notes — and keeps the rest.
 
     Human surfaces render at the benchmark's conventional precision;
     full precision lives only in results/leader.json, and every
@@ -2268,12 +2283,18 @@ def pr_body(
         ]
     else:
         banner = []
-    panel_section = (
-        ["", "## Pre-PR verification", "", result.panel_transcript[:MAX_REPORT_BODY]]
-        if result.panel_transcript
-        else []
+    posted = transcripts_posted() if transcripts is None else transcripts
+    panel_text = (
+        result.panel_transcript[:MAX_REPORT_BODY]
+        if posted
+        else panel_summary(result.panel_rounds, result.panel_blocking_open, result.panel_degraded)
     )
-    if result.submit_report:
+    panel_section = (
+        ["", "## Pre-PR verification", "", panel_text] if result.panel_transcript else []
+    )
+    if not posted:
+        report_lines = [TRANSCRIPT_WITHHELD]
+    elif result.submit_report:
         report_lines = [
             "*Written by the author at submit, before the orchestrator measured; the "
             "panel read it against the diff and the experiments below.*",
@@ -2305,7 +2326,7 @@ def pr_body(
             "## Research report",
             "",
             *report_lines,
-            *_experiments_section(experiments or []),
+            *_experiments_section(experiments or [], why=posted),
             "",
             "## Measured",
             "",

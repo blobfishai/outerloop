@@ -211,6 +211,20 @@ def test_throttling_stamps_a_short_pause(tmp_path) -> None:
     assert outage_active(tmp_path, now=1000.0 + THROTTLE_COOLDOWN_S) == ""
 
 
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "❌ Rate limited after 3 retries — HTTP 429: slow down",  # hermes
+        "exceeded retry limit, last status: 429 Too Many Requests",  # codex
+        "HTTP 429: Resource has been exhausted (e.g. check quota).",  # Vertex
+    ],
+)
+def test_openai_compatible_throttling_stamps_the_short_pause(tmp_path, detail: str) -> None:
+    stamp_outage(tmp_path, detail, now=1000.0)
+    assert outage_active(tmp_path, now=1000.0 + THROTTLE_COOLDOWN_S - 1)
+    assert outage_active(tmp_path, now=1000.0 + THROTTLE_COOLDOWN_S) == ""
+
+
 def test_corrupt_outage_stamp_reads_inactive(tmp_path) -> None:
     """A bad latch must never brick the loop. The path must be the one the
     reader actually consults (review finding: a stale filename made this

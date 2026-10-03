@@ -8,6 +8,73 @@ Versions follow [SemVer](https://semver.org).
 
 ### Added
 
+- `OUTERLOOP_CODEX_CONFIG` supplies the default for the climb's
+  `--codex-config`: codex `-c KEY=VALUE` overrides separated by `;` (a TOML
+  value may hold commas). It is on the tick's `.env` allowlist, and the tick
+  forwards it to every climb and wake job as `--codex-config` flags, which
+  replace a job's own environment default. A malformed value refuses a Codex
+  author on the tick host before anything is queued, and fails only jobs that
+  start a Codex session. The value never carries a credential, since it rides
+  job command lines and reaches every codex judge: `experimental_bearer_token`,
+  a command-backed `auth` table, an `http_headers` or `query_params` entry
+  named like a credential and a `base_url` with a user, password, query string
+  or fragment are refused, and an error names an entry's key or position,
+  never its text. Upgrading: `wake-spec.json` gains a `codex_config` field;
+  older kernels ignore it, and a spec without it loads as before.
+- Panel judges can use an OpenAI-compatible endpoint. Hermes judges take
+  `REVIEW_HERMES_PROVIDER=custom` with `REVIEW_HERMES_BASE_URL`; the harness
+  seeds a named provider entry carrying the base URL in the session's private
+  config, and the key stays in the session environment. A base URL is refused
+  with the OpenRouter and OpenAI providers, and when it carries a user,
+  password, query string or fragment; a refusal names only its scheme and
+  host. With neither setting, hermes judges run on OpenRouter, except for a
+  Hermes author on another provider, whose panel is refused until
+  `REVIEW_HERMES_PROVIDER` names where its judges run. Codex judges receive
+  the author's codex config followed by `--panel-codex-config` /
+  `OUTERLOOP_PANEL_CODEX_CONFIG`, which the tick forwards with the panel. The
+  tick preflight checks the same settings, and compares every shelled judge's
+  key by value with the fleet author's key as well as the coexisting Codex
+  author key. A climb started by hand now refuses a judge key that holds the
+  author's key; a wake still skips the panel. Codex config values lose the
+  blank after `=`. Upgrading: `wake-spec.json` gains `panel_codex_config`;
+  older kernels ignore it.
+- Hermes is an author backend beside Claude and Codex
+  (`OUTERLOOP_AUTHOR_BACKEND=hermes`, `--author-backend hermes`). It runs
+  contained, needs a model named for its provider, the pinned source in
+  `REVIEW_HERMES_REPO` and a key in `OUTERLOOP_HERMES_KEY_FILE`, and reaches
+  OpenRouter, OpenAI or an OpenAI-compatible endpoint through
+  `OUTERLOOP_HERMES_PROVIDER` and `OUTERLOOP_HERMES_BASE_URL`. The climb and the
+  wake build the author through one construction; the tick preflight, `start`,
+  `outerloop init` and `outerloop harness upgrade --used` accept it. Claude and
+  Codex deployments behave as before. A hermes session's error is its
+  API-failure lines, and a throttled, unavailable or unreachable
+  OpenAI-compatible endpoint ends the run as an outage (throttling with the
+  short pause). A run records the endpoint its author started on, a hermes
+  provider and base URL or a codex author's provider, profile and base URL
+  overrides, and its wakes reproduce it with the run's key file, so a
+  deployment that moves its endpoint never sends a parked run's key or
+  conversation there. Upgrading: run records gain `author_endpoint`, and
+  `author_backend` may now be `hermes`; an older kernel ignores the field (a
+  record it re-saves loses it, and that run's wakes then use the deployment's
+  endpoint) and its wake refuses the hermes backend and hands the lease back,
+  so drain hermes-authored runs before rolling back.
+- `OUTERLOOP_POST_TRANSCRIPTS=off` keeps session text off GitHub, for a
+  private target or sessions that read material that must stay on the
+  deployment's hosts. Pull requests and their edits, issue reports (climb and
+  steward), archived `research-log` reports, and the climb board and status
+  strip carry the measured results, what ran, the panel's outcome and a note
+  instead of the author's report, the judges' transcripts, the author's launch
+  notes and a withdrawal reason; the pushed commit's subject no longer quotes
+  the report. The run's local records keep the text. Unset, the text is
+  posted; set, the switch fails closed: only `1`, `on`, `true` or `yes` post it,
+  and an empty value is an off-switch like `OUTERLOOP_PANEL=""`. It is on the
+  tick's `.env` allowlist. Replies to review comments, pushed code and a
+  research line's notebook are not covered (docs/install.md). Every job also
+  reads the setting from `~/.config/outerloop/.env` each time it posts, and
+  either place switching it off keeps the text off, so an off-switch reaches
+  runs already in flight, including the wakes a parked run submits from its
+  own job with the environment it started with. Upgrading: unset, nothing
+  changes; an older kernel ignores the setting and posts the text.
 - Native research plans can explicitly select Claude/Codex API authentication
   or Claude on Vertex, alongside the existing subscription mode. Public
   authentication coordinates belong to the persistent conversation identity;
@@ -23,6 +90,26 @@ Versions follow [SemVer](https://semver.org).
 
 ### Fixed
 
+- A full `outerloop init --force` keeps every `.env` setting it does not ask
+  about. It kept only the panel's and endpoints' settings, so a rerun dropped
+  `OUTERLOOP_POST_TRANSCRIPTS`, judge and author key files and Vertex billing
+  without saying so; the focused `--github-app` run already kept them.
+- An API failure is an outage only where its text names a status ("HTTP 401",
+  "Error code: 429", "401 Unauthorized"), never because "401" appears in it: a
+  token count or the random name of a hermes sample file could pause every
+  lane.
+- A credential rotated while a run is live is redacted from what the kernel
+  posts. `FileTokenProvider` re-reads its file on every call, but each run's
+  redaction set was a snapshot taken at start, so a rewritten PAT or key could
+  reach a pull request body or a posted report. Every value a token provider
+  reads now joins a process-wide set that `redact` consults at write time, as
+  it already did for minted App tokens, and `GitHubClient` passes every posted
+  body, title, commit message and file text through that redaction just before
+  sending, after reading the credential it is about to use.
+- The chain's deploy step strips quotes from a `.env` value only when they
+  form a matching pair, as `outerloop start` does. It removed a lone trailing
+  quote, so a value ending in a TOML string, such as the codex override
+  `model_provider="local"`, reached a cluster tick without its closing quote.
 - An author waking before its first PR refreshes its measurement base and
   contract along with submission freshness. Folding an upstream improvement
   can no longer pass preflight while comparing against the old baseline.

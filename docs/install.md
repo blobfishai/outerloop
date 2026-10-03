@@ -303,7 +303,7 @@ outerloop checkout, run `bash scripts/install_claude.sh [target_path]` or
 The default target is `$OUTERLOOP_<BACKEND>_BIN`, else `~/.local/bin/<backend>`.
 Claude 2.1.272 is pinned for Linux x64 (glibc/musl) and ARM64; other platforms
 are refused. Installation needs `curl`, `sha256sum`, and a writable target
-directory. Hermes remains a review backend, provisioned with
+directory. Hermes, as author or reviewer, is provisioned with
 `bash scripts/install_hermes.sh [target_dir]`.
 
 **Host prerequisites for model backends.** From the outerloop checkout:
@@ -312,8 +312,9 @@ directory. Hermes remains a review backend, provisioned with
   `bash scripts/install_claude.sh`.
 - Codex, as author or reviewer: the pinned Codex CLI; install with
   `bash scripts/install_codex.sh`.
-- Hermes, as reviewer only (not an author backend): the pinned hermes-agent
-  source checkout and runtime; install with `bash scripts/install_hermes.sh`.
+- Hermes, as author or reviewer: the pinned hermes-agent source checkout and
+  runtime; install with `bash scripts/install_hermes.sh`. Every hermes role
+  shares the one checkout named by `REVIEW_HERMES_REPO`.
 
 `init` records the absolute Claude
 or Codex path found on PATH (or in `~/.local/bin`) as `OUTERLOOP_<BACKEND>_BIN`.
@@ -323,9 +324,10 @@ launch before any job runs. After installing or moving it, run
 `outerloop init --force` to record its path again. `--dry-run` prints the launch
 command without checking the CLI. For Hermes, set `REVIEW_HERMES_REPO` to the installed checkout (the installer
 defaults to `~/hermes-agent`). Full `init` installs a missing Hermes runtime when
-`OUTERLOOP_PANEL` includes a Hermes lens or `REVIEW_BACKEND=hermes`, reading the
-shell or existing `.env`, and records `REVIEW_HERMES_REPO`. `--no-install-harness`
-skips this installation too.
+the author is Hermes, `OUTERLOOP_PANEL` includes a Hermes lens or
+`REVIEW_BACKEND=hermes`, reading the shell or existing `.env`, and records
+`REVIEW_HERMES_REPO`; for a Hermes author, `start` checks that checkout and its
+runtime instead of a CLI. `--no-install-harness` skips this installation too.
 
 The Hermes installer needs `git` and `uv`. After verifying the pinned source it
 installs a uv-managed Python under `<repo>.runtime/<commit-sha>/python` and runs
@@ -360,7 +362,11 @@ identity from 2b, the Claude model (`OUTERLOOP_CLAUDE_MODEL`, required for
 every Claude role), and the author's model key, and writes
 `~/.config/outerloop/.env` (all `0600`) — everything the prose below otherwise
 sets by hand. The rest of this section documents what it writes, for when
-you'd rather set it directly.
+you'd rather set it directly. Rerunning `outerloop init --force` rewrites only
+what it asks about (placement, target, auth, the author and Claude models, the
+image, and the author's key file and harness path when it finds them); every
+other line of the existing `.env`, such as the panel's settings, the judges' key
+files, `OUTERLOOP_POST_TRANSCRIPTS` or Vertex billing, is kept.
 
 The orchestrator is CPU-only and makes outbound connections only. Anywhere
 that can reach GitHub and your LLM provider works.
@@ -495,10 +501,19 @@ the line to add; `OUTERLOOP_AUTHOR_MODEL` overrides it for the author and
 same-backend judges. The
 author key file is
 `OUTERLOOP_<BACKEND>_KEY_FILE` (`OUTERLOOP_CLAUDE_KEY_FILE`,
-`OUTERLOOP_CODEX_KEY_FILE`; `init` writes the key to
+`OUTERLOOP_CODEX_KEY_FILE`, `OUTERLOOP_HERMES_KEY_FILE`; `init` writes the key to
 `~/.config/outerloop/<backend>_key`, 0600). A Codex author always runs contained,
 so it also needs the image
-(`OUTERLOOP_IMAGE`) and a Codex model in `OUTERLOOP_AUTHOR_MODEL`. On a
+(`OUTERLOOP_IMAGE`) and a Codex model in `OUTERLOOP_AUTHOR_MODEL`. A Hermes
+author runs contained as well; it needs the model name its provider serves in
+`OUTERLOOP_AUTHOR_MODEL`, the pinned source in `REVIEW_HERMES_REPO`, and its
+provider in `OUTERLOOP_HERMES_PROVIDER` (`openrouter`, the default, `openai`, or
+`custom` with `OUTERLOOP_HERMES_BASE_URL`; see below).
+`OUTERLOOP_CODEX_CONFIG` passes codex `-c KEY=VALUE` overrides to the Codex
+author, separated by `;` because a TOML value may hold commas (for example
+`use_legacy_landlock=true;model_reasoning_effort=high`). The tick forwards it to
+every climb and wake job; a malformed value stops a Codex author before the tick
+queues anything. On a
 cluster, evals run inside the Apptainer image at `OUTERLOOP_IMAGE` (default
 `~/outerloop-images/agent-py312.sif`) in a jail that binds only the
 checked-out tree — an eval that needs data must fetch it into the tree, and
@@ -735,6 +750,114 @@ path. Contained sessions get the ADC file bind-mounted read-only; the
 session env then carries no Anthropic key at all. Unset the project var to
 fall back to API-key billing. OpenAI-backed roles (codex/hermes) are
 unaffected — those models are not on GCP.
+
+## Models on an OpenAI-compatible endpoint
+
+The author and the panel judges can run models served behind any
+OpenAI-compatible API (a self-hosted inference server, or a managed endpoint for
+open-weights models) instead of a vendor's own API.
+
+- **Hermes author.** Set `OUTERLOOP_AUTHOR_BACKEND=hermes`,
+  `OUTERLOOP_AUTHOR_MODEL` to the model name the endpoint serves,
+  `OUTERLOOP_HERMES_PROVIDER=custom` and `OUTERLOOP_HERMES_BASE_URL` to the
+  endpoint (for example `https://models.example.com/v1`). The key file is
+  `OUTERLOOP_HERMES_KEY_FILE` (default `~/.config/outerloop/hermes_key`). The
+  author runs contained, with the file and terminal toolsets, and resumes
+  across wakes from its saved transcript. Live session events and the
+  session-control writer record cover Claude and Codex authors only. A lens
+  that names no backend runs on Hermes for a Hermes author. When the endpoint
+  is down, throttled or refuses connections, the run ends as an outage and the
+  lanes pause, rather than launching more runs into the endpoint.
+- **Codex author.** Define the endpoint as a codex model provider in
+  `OUTERLOOP_CODEX_CONFIG`, for example
+  `model_provider=local;model_providers.local.name=local;model_providers.local.base_url=https://models.example.com/v1;model_providers.local.env_key=OPENAI_API_KEY`,
+  plus any other model provider option the endpoint needs. The session
+  receives the author key as `OPENAI_API_KEY`.
+- **Hermes judges.** Set `REVIEW_HERMES_PROVIDER=custom` and
+  `REVIEW_HERMES_BASE_URL` to the endpoint's base URL (for example
+  `https://models.example.com/v1`), and name the model in the lens
+  (`verify:hermes:my-model`). The judge's key file is still
+  `OUTERLOOP_PANEL_HERMES_KEY_FILE`. The harness writes a named provider entry
+  with the base URL into the session's private hermes config and passes the key
+  only through the session environment. A base URL is accepted only with the
+  `custom` provider, so an OpenRouter or OpenAI key is never sent to another
+  host. With neither setting, hermes judges run on OpenRouter, except for a
+  Hermes author on another provider: its judges, including the default
+  `verify,review` lenses that run the author's model, would send its claim
+  and the judge key to OpenRouter, so the climb and the tick refuse until
+  `REVIEW_HERMES_PROVIDER` (and `REVIEW_HERMES_BASE_URL` for `custom`) names
+  where the judges run, for example the author's own endpoint.
+- **Codex judges.** Codex reads model providers from its config, so codex
+  judges run with the author's `OUTERLOOP_CODEX_CONFIG` followed by
+  `OUTERLOOP_PANEL_CODEX_CONFIG`. Codex applies `-c` overrides in order, so the
+  panel's value wins for a key both set, for example
+  `model_providers.local.base_url` to point the judges at another endpoint. A
+  provider entry that reads `OPENAI_API_KEY` receives the judge's own key.
+
+The judge keys stay separate from the author's. The tick compares key values,
+not only paths, before it queues a climb; a climb started by hand refuses a
+judge key that holds the author's key, and a wake skips the panel instead.
+
+Keys live only in key files. A base URL is not a secret: it appears in the
+session's command line, its config and its logs, so `OUTERLOOP_HERMES_BASE_URL`
+and `REVIEW_HERMES_BASE_URL` must be plain http(s) URLs, and one with a user,
+password, query string or fragment is refused without being repeated in the
+error. `OUTERLOOP_CODEX_CONFIG` and `OUTERLOOP_PANEL_CODEX_CONFIG` reach job
+command lines, `wake-spec.json` and (the author's) every codex judge, so they
+refuse `experimental_bearer_token`, a command-backed `auth` table, a static
+`http_headers` or `query_params` entry named like a credential (`Authorization`,
+`api-key`, `token`, ...) and a `base_url` with a user, password, query string
+or fragment. Use `env_key` (or `env_http_headers`) instead.
+
+A run records the endpoint its author started on: a Hermes author's provider
+and base URL, a Codex author's provider, profile and base URL overrides. Its
+wakes use that endpoint with the run's own key file, so moving the deployment
+to another endpoint never sends a parked run's key or conversation there; new
+runs start on the new endpoint. Other codex settings follow the deployment.
+
+## Keeping session text off GitHub
+
+By default a pull request carries the author's report and the panel judges'
+transcripts, the requesting issue gets the run report, and the `research-log`
+branch archives it. A deployment whose target is private, or whose sessions
+read material that must stay on its own hosts, can set
+`OUTERLOOP_POST_TRANSCRIPTS=off` in `~/.config/outerloop/.env`. Pull requests
+and their edits, issue reports, archived run reports, and the climb board and
+status strip then carry the measured results, what ran, the panel's outcome
+and a note in place of the author's report, the judges' transcripts, the
+author's note on each launch and a withdrawal reason; the pushed commit's
+subject no longer quotes the report. The run's local records on the
+orchestrator host keep the text. Unset, the text is posted; once the setting
+is present, only `1`, `on`, `true` or `yes` post it. An empty value is an
+off-switch, as `OUTERLOOP_PANEL=""` is for the panel, and any other value (a
+typo, a trailing comment) keeps the text off too and is logged.
+
+Every job reads the setting from `~/.config/outerloop/.env` each time it posts,
+as well as from its own environment, and either one switching it off keeps the
+text off. A job keeps the environment it was submitted with, and a parked run
+submits its next wake from its own job, so the `.env` is what carries an
+off-switch to runs already in flight, from their next post on. A `.env` that
+exists but is not yours or is group- or world-writable (the deploy step refuses
+to read it) keeps the text off as well. Setting it back on in the `.env` takes
+effect for jobs whose environment does not switch it off.
+
+The switch does not cover:
+
+- the author's replies to review comments, which are messages it addresses to
+  the reviewers;
+- the code it pushes, and the notebook a research-line author keeps on its line
+  branch, which is the line's working memory;
+- the experiments table's launch names and the last line each job printed;
+- text published before the switch was set.
+
+An older kernel ignores the setting, so roll back only with this in mind.
+
+Independent of this switch, every body, title, commit message and file the
+kernel writes to GitHub through its API is redacted at the moment it is sent,
+against every credential the process has read or minted. A PAT or key file
+rewritten while a run is live is therefore never posted, even in text built
+before the rotation. Git pushes carry the tree the gate measured, which the
+kernel does not rewrite.
 
 ## Safety defaults
 

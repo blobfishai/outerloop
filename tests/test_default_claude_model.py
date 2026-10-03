@@ -387,7 +387,7 @@ def test_resume_cli_uses_pinned_model_without_deployment_model(
     )
     seen = []
 
-    def capture_author(backend, model, image):
+    def capture_author(backend, model, image, endpoint=None):
         seen.append((backend, model))
         return ""
 

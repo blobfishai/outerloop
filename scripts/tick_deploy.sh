@@ -35,11 +35,16 @@ env_line() {
     _line=$(grep -E "^${_k}=" "$ENV_FILE" 2>/dev/null | tail -1)
 }
 # env_value: the value of $_line into $_v — the CR of a CRLF-edited file and
-# one pair of surrounding quotes stripped
+# one MATCHING pair of surrounding quotes stripped, as `outerloop start` reads
+# the file. A lone quote at either end is part of the value: a codex override
+# such as model_provider="local" must keep its closing quote.
 env_value() {
     _v=${_line#*=}
     _v=${_v%$'\r'}
-    _v=${_v#[\"\']}; _v=${_v%[\"\']}
+    case "$_v" in
+        \"*\") _v=${_v#\"}; _v=${_v%\"} ;;
+        \'*\') _v=${_v#\'}; _v=${_v%\'} ;;
+    esac
 }
 
 # --- 2. deploy: move the checkout per the update policy, sync deps ---
@@ -140,18 +145,20 @@ if [ -n "$ENV_TRUSTED" ]; then
                   OUTERLOOP_CACHE_ROOT REVIEW_BACKEND \
                   OUTERLOOP_AUTHOR_BACKEND OUTERLOOP_AUTHOR_MODEL OUTERLOOP_CLAUDE_MODEL \
                   OUTERLOOP_CLAUDE_BIN OUTERLOOP_CODEX_BIN OUTERLOOP_CODEX_KEY_FILE \
+                  OUTERLOOP_CODEX_CONFIG \
+                  OUTERLOOP_HERMES_KEY_FILE OUTERLOOP_HERMES_PROVIDER OUTERLOOP_HERMES_BASE_URL \
                   OUTERLOOP_CLAUDE_KEY_FILE OUTERLOOP_STEWARD_KEY_FILE \
                   OUTERLOOP_VERTEX_PROJECT OUTERLOOP_VERTEX_REGION \
                   OUTERLOOP_VERTEX_ADC OUTERLOOP_VERTEX_SMALL_MODEL \
-                  OUTERLOOP_TARGET \
+                  OUTERLOOP_TARGET OUTERLOOP_POST_TRANSCRIPTS \
                   OUTERLOOP_GITHUB_APP_FILE OUTERLOOP_BOT_LOGIN OUTERLOOP_BOT_ALIASES \
                   OUTERLOOP_GPU_PARTITION OUTERLOOP_GPU_ACCOUNT \
                   OUTERLOOP_QOS OUTERLOOP_APPTAINER_BIN \
                   OUTERLOOP_IMAGE \
                   OUTERLOOP_PANEL OUTERLOOP_PANEL_KEY_FILE \
-                  OUTERLOOP_PANEL_CODEX_KEY_FILE \
+                  OUTERLOOP_PANEL_CODEX_KEY_FILE OUTERLOOP_PANEL_CODEX_CONFIG \
                   OUTERLOOP_PANEL_HERMES_KEY_FILE \
-                  REVIEW_HERMES_REPO REVIEW_HERMES_PROVIDER; do
+                  REVIEW_HERMES_REPO REVIEW_HERMES_PROVIDER REVIEW_HERMES_BASE_URL; do
         env_line
         # PRESENCE-based, not value-based: a key set to "" in .env is a
         # live OFF-SWITCH (OUTERLOOP_PANEL="" disables the panel,

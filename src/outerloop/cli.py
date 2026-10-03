@@ -65,6 +65,10 @@ TICK_ENV_KEYS = (
     "OUTERLOOP_CLAUDE_BIN",
     "OUTERLOOP_CODEX_BIN",
     "OUTERLOOP_CODEX_KEY_FILE",
+    "OUTERLOOP_CODEX_CONFIG",
+    "OUTERLOOP_HERMES_KEY_FILE",
+    "OUTERLOOP_HERMES_PROVIDER",
+    "OUTERLOOP_HERMES_BASE_URL",
     "OUTERLOOP_CLAUDE_KEY_FILE",
     "OUTERLOOP_STEWARD_KEY_FILE",
     "OUTERLOOP_VERTEX_PROJECT",
@@ -72,6 +76,7 @@ TICK_ENV_KEYS = (
     "OUTERLOOP_VERTEX_ADC",
     "OUTERLOOP_VERTEX_SMALL_MODEL",
     "OUTERLOOP_TARGET",
+    "OUTERLOOP_POST_TRANSCRIPTS",
     "OUTERLOOP_GITHUB_APP_FILE",
     "OUTERLOOP_BOT_LOGIN",
     "OUTERLOOP_BOT_ALIASES",
@@ -83,9 +88,11 @@ TICK_ENV_KEYS = (
     "OUTERLOOP_PANEL",
     "OUTERLOOP_PANEL_KEY_FILE",
     "OUTERLOOP_PANEL_CODEX_KEY_FILE",
+    "OUTERLOOP_PANEL_CODEX_CONFIG",
     "OUTERLOOP_PANEL_HERMES_KEY_FILE",
     "REVIEW_HERMES_REPO",
     "REVIEW_HERMES_PROVIDER",
+    "REVIEW_HERMES_BASE_URL",
 )
 
 
@@ -394,16 +401,26 @@ def _setting_of(key: str, values: Mapping[str, str], environ: Mapping[str, str])
 
 
 def missing_harness_binary(values: Mapping[str, str], environ: Mapping[str, str]) -> str:
-    """Check only the configured author's host CLI, using the harness's lookup."""
+    """Check only the configured author's host CLI, using the harness's lookup.
+    A hermes author has no CLI: its pinned source and runtime must be ready at
+    REVIEW_HERMES_REPO, the checkout every hermes role shares."""
     backend = _setting_of("OUTERLOOP_AUTHOR_BACKEND", values, environ).lower() or "claude"
+    if backend == "hermes":
+        from outerloop.hermes_install import hermes_ready
+
+        repo = _setting_of("REVIEW_HERMES_REPO", values, environ)
+        if repo and hermes_ready(Path(repo).expanduser()):
+            return ""
+        where = f"at {repo}" if repo else "(REVIEW_HERMES_REPO is not set)"
+        return (
+            f"hermes author: the pinned hermes-agent source and runtime {where} are not "
+            f"ready; install them with `{HARNESS_INSTALL['hermes']} <dir>` and record "
+            f"REVIEW_HERMES_REPO=<dir> in {ENV_FILE} (`outerloop init --force` with "
+            "REVIEW_HERMES_REPO exported does both)"
+        )
     key = f"OUTERLOOP_{backend.upper()}_BIN"
     if key not in HARNESS_BIN_KEYS:
-        hint = (
-            f" Hermes is a review backend; install its source with `{HARNESS_INSTALL['hermes']}`."
-            if backend == "hermes"
-            else ""
-        )
-        return f"unsupported author backend {backend!r}; choose claude or codex.{hint}"
+        return f"unsupported author backend {backend!r}; choose claude, codex or hermes."
     env = {**values, **environ}
     recorded = env.get(key, "")
     binary = default_binary(backend, env)

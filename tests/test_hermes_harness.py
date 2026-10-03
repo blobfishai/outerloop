@@ -387,3 +387,119 @@ def test_container_mode_jails_the_session(tmp_path, monkeypatch) -> None:
     h2 = HermesHarness(api_key="sk-h", repo_dir=repo, provider="openai-api")
     h2.run("brief", ws)
     assert captured["command"][0] == str(runtime / "venv/bin/python")
+
+
+# ------------------------------------------- an endpoint that cannot serve us
+
+
+def _hermes_run_output(*failure: str, final: str, sample: str = "sample_3fa0c2d1.json") -> str:
+    """hermes-agent's stdout, in the pinned release's layout, for a run whose
+    every model call failed: the request lines, the flushed retry trace and
+    terminal status (`failure`), then the summary, the final response it
+    returns in place of a reply, and the closing banner."""
+    return "\n".join(
+        [
+            "🎯 Enabled toolsets: ['file', 'terminal']",
+            "📝 User Query: Read the file /run/ws-home/brief.md and follow it.",
+            "=" * 50,
+            "🔄 Making API call #1/60...",
+            "   📊 Request size: 3 messages, ~12,401 tokens (~49,604 chars)",
+            "   🔌 Provider: custom  Model: Qwen/Qwen3-32B",
+            "   🌐 Endpoint: https://models.example.com/v1",
+            "   ⏱️  Elapsed: 0.41s  Context: 3 msgs, ~12,401 tokens",
+            *failure,
+            "",
+            "=" * 50,
+            "📋 CONVERSATION SUMMARY",
+            "=" * 50,
+            "✅ Completed: False",
+            "📞 API Calls: 1",
+            "💬 Messages: 1",
+            "",
+            "🎯 FINAL RESPONSE:",
+            "-" * 30,
+            final,
+            "",
+            f"💾 Sample trajectory saved to: {sample}",
+            "",
+            "👋 Agent execution completed!",
+        ]
+    )
+
+
+THROTTLED = (
+    "⚠️  API call failed (attempt 3/3): RateLimitError [HTTP 429]",
+    "❌ Rate limited after 3 retries — HTTP 429: Resource has been exhausted (check quota).",
+    "   💀 Final error: HTTP 429: Resource has been exhausted (check quota).",
+)
+NO_WORKERS = (
+    "⚠️  API call failed (attempt 3/3): InternalServerError [HTTP 503]",
+    "❌ API failed after 3 retries — HTTP 503: no workers available",
+    "   💀 Final error: HTTP 503: no workers available",
+)
+REFUSED = (
+    "⚠️  API call failed (attempt 3/3): APIConnectionError",
+    "❌ API failed after 3 retries — Connection error.",
+    "   💀 Final error: Connection error.",
+)
+
+
+@pytest.mark.parametrize("failure", [THROTTLED, NO_WORKERS, REFUSED], ids=["429", "503", "refused"])
+def test_an_endpoint_that_cannot_serve_us_is_an_outage(failure: tuple[str, ...]) -> None:
+    """A throttled managed API, a serverless endpoint with no workers, a
+    server that refuses connections: hermes exits 0 with no reply, and the
+    run must read as an outage (the lanes pause, no work order is billed),
+    not as the run's own error."""
+    final = f"API call failed after 3 retries: {failure[-1].split('Final error: ')[1]}"
+    result = _parse_hermes_result(_hermes_run_output(*failure, final=final), None, 0)
+    assert result.is_error and harness_mod.outage(result)
+    # the cause is hermes's failure lines, not its banner, token counts or URL
+    detail = result.error_detail
+    assert failure[1].strip() in detail
+    assert "sample_" not in detail and "12,401" not in detail and "Endpoint" not in detail
+
+
+def test_a_failure_of_the_run_itself_is_never_an_outage() -> None:
+    """A bare 401 is not a status: a token count names one, and so can the
+    random id of the sample file every hermes run saves."""
+    overflow = _hermes_run_output(
+        "❌ Non-retryable error (HTTP 400): HTTP 400: maximum context length is 32,401 tokens",
+        "❌ Non-retryable client error (HTTP 400). Aborting.",
+        final="HTTP 400: maximum context length is 32,401 tokens",
+        sample="sample_a401b2c3.json",
+    )
+    result = _parse_hermes_result(overflow, None, 0)
+    assert result.is_error and not harness_mod.outage(result)
+    crash = "Traceback (most recent call last):\nKeyError: 'tools'\n\n"
+    crash += (
+        "💾 Sample trajectory saved to: sample_c0401aaa.json\n\n👋 Agent execution completed!\n"
+    )
+    result = _parse_hermes_result(crash, None, 1)
+    assert not harness_mod.outage(result)
+    assert result.error_detail == "Traceback (most recent call last):\nKeyError: 'tools'"
+
+
+def test_a_hermes_session_on_a_dead_endpoint_reads_as_an_outage(monkeypatch, tmp_path) -> None:
+    out = _hermes_run_output(*NO_WORKERS, final="API call failed after 3 retries: HTTP 503")
+
+    class FakePopen:
+        returncode = 0
+
+        def __init__(self, command: list[str], **_: Any) -> None:
+            pass
+
+        def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+            return out, ""
+
+    monkeypatch.setattr(harness_mod.subprocess, "Popen", FakePopen)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    result = HermesHarness(
+        api_key="k",
+        repo_dir=tmp_path / "hermes",
+        provider="custom:outerloop",
+        key_env="OPENAI_COMPATIBLE_API_KEY",
+        base_url="https://models.example.com/v1",
+    ).run("brief", ws)
+    assert result.is_error and result.num_turns == 0
+    assert harness_mod.outage(result)

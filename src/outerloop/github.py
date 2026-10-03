@@ -153,6 +153,28 @@ class TokenProvider(Protocol):
     def token(self) -> str: ...
 
 
+# Every credential value this process has read through a token provider. A
+# key or token file can be rewritten while a run is live (a rotated PAT or
+# API key), and FileTokenProvider re-reads it on every call, so a redaction
+# set snapshotted when the run started misses the new value. `redact`
+# consults this list at write time, as it does the App provider's minted
+# tokens. Shorter values are not usable credentials, and replacing them
+# everywhere would mangle ordinary text.
+MIN_SECRET_CHARS = 8
+_SEEN_SECRETS: list[str] = []
+
+
+def remember_secret(value: str) -> None:
+    """Add a credential value to the write-time redaction set."""
+    if len(value) >= MIN_SECRET_CHARS and value not in _SEEN_SECRETS:
+        _SEEN_SECRETS.append(value)
+
+
+def seen_secrets() -> tuple[str, ...]:
+    """Every credential value read this process, for write-time redaction."""
+    return tuple(_SEEN_SECRETS)
+
+
 @dataclass(frozen=True)
 class EnvTokenProvider:
     """Reads a token from an environment variable (CI-supplied credentials)."""
@@ -163,12 +185,15 @@ class EnvTokenProvider:
         token = os.environ.get(self.variable, "").strip()
         if not token:
             raise ValueError(f"{self.variable} is unset or empty")
+        remember_secret(token)
         return token
 
 
 @dataclass(frozen=True)
 class FileTokenProvider:
-    """Reads a credential file (the bot PAT on the orchestrator host)."""
+    """Reads a credential file (the bot PAT on the orchestrator host). The file
+    is read on every call, so a rotated credential takes effect at once; each
+    value read joins the write-time redaction set (`seen_secrets`)."""
 
     path: Path
 
@@ -181,6 +206,7 @@ class FileTokenProvider:
         token = self.path.read_text().strip()
         if not token:
             raise ValueError(f"{self.path} is empty")
+        remember_secret(token)
         return token
 
 
@@ -242,6 +268,42 @@ def _default_transport(request: urllib.request.Request) -> Any:
     return json.loads(payload) if payload else None
 
 
+# The text a mutation publishes: comment, issue, pull request and review
+# bodies, titles, and commit messages.
+_POSTED_TEXT_FIELDS = frozenset({"body", "title", "message"})
+
+
+def _file_bytes(content: str) -> str:
+    """A text file's content for the GitHub API (base64), after write-time
+    redaction: files the kernel writes (run reports, the ledger, the boards)
+    are posted text too."""
+    from outerloop.harness import redact
+
+    return base64.b64encode(redact(content, ()).encode()).decode()
+
+
+def _redact_posted_text(payload: Any) -> Any:
+    """`payload` with every posted text field passed through write-time
+    redaction: the last point before anything reaches GitHub, so a credential
+    minted or rotated after a caller built its secret set can never be posted,
+    whatever path built the text. Other fields (refs, shas, file contents) are
+    left exactly as given."""
+    from outerloop.harness import redact
+
+    if isinstance(payload, dict):
+        return {
+            key: (
+                redact(value, ())
+                if key in _POSTED_TEXT_FIELDS and isinstance(value, str)
+                else _redact_posted_text(value)
+            )
+            for key, value in payload.items()
+        }
+    if isinstance(payload, list):
+        return [_redact_posted_text(item) for item in payload]
+    return payload
+
+
 @dataclass
 class GitHubClient:
     """Minimal REST surface the orchestrator needs. Mutations honor dry_run."""
@@ -252,17 +314,29 @@ class GitHubClient:
     dry_run: bool = False
 
     def _request(self, method: str, path: str, body: dict[str, Any] | None = None) -> Any:
+        # the credential first: a token this very call re-reads (rotated since
+        # the last one) is then known to the redaction below
+        token = self.auth.token()
+        if body is not None and method != "GET":
+            body = _redact_posted_text(body)
         request = urllib.request.Request(
             f"{API}{path}",
             method=method,
             data=json.dumps(body).encode() if body is not None else None,
             headers={
-                "Authorization": f"Bearer {self.auth.token()}",
+                "Authorization": f"Bearer {token}",
                 "Accept": "application/vnd.github+json",
                 "Content-Type": "application/json",
             },
         )
         return self.transport(request)
+
+    def _encoded(self, content: str) -> str:
+        """A text file's content for the API, redacted: the credential this
+        client will send is read first, so a token rotated since the last
+        call is already known to the redaction."""
+        self.auth.token()
+        return _file_bytes(content)
 
     @staticmethod
     def _expect_dict(data: Any, path: str) -> dict[str, Any]:
@@ -315,7 +389,7 @@ class GitHubClient:
                 self._request(
                     "POST",
                     blob_path,
-                    {"content": base64.b64encode(content.encode()).decode(), "encoding": "base64"},
+                    {"content": self._encoded(content), "encoding": "base64"},
                 ),
                 blob_path,
             )
@@ -1018,7 +1092,7 @@ class GitHubClient:
         api = f"/repos/{quoted}/contents/{urllib.parse.quote(path)}"
         body: dict[str, Any] = {
             "message": message,
-            "content": base64.b64encode(content.encode()).decode(),
+            "content": self._encoded(content),
             "branch": branch,
         }
         try:
@@ -1098,7 +1172,7 @@ class GitHubClient:
                     "POST",
                     f"/repos/{quoted}/git/blobs",
                     {
-                        "content": base64.b64encode(content.encode()).decode(),
+                        "content": self._encoded(content),
                         "encoding": "base64",
                     },
                 )
